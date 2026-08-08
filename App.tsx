@@ -7,6 +7,7 @@ import { StatusBar } from "expo-status-bar"
 import TodayScreen from "./src/screens/TodayScreen"
 import TimetableScreen from "./src/screens/TimetableScreen"
 import StatsScreen from "./src/screens/StatsScreen"
+import SettingsScreen from "./src/screens/SettingsScreen"
 import { colors } from "./src/theme"
 
 const Tab = createBottomTabNavigator()
@@ -25,7 +26,8 @@ const navTheme = {
 const ICONS: Record<string, keyof typeof MaterialIcons.glyphMap> = {
   Today: "today",
   Timetable: "calendar-view-week",
-  Stats: "bar-chart"
+  Stats: "bar-chart",
+  Settings: "settings"
 }
 
 export default function App() {
@@ -55,6 +57,7 @@ export default function App() {
         <Tab.Screen name="Today" component={TodayScreen} />
         <Tab.Screen name="Timetable" component={TimetableScreen} />
         <Tab.Screen name="Stats" component={StatsScreen} />
+        <Tab.Screen name="Settings" component={SettingsScreen} />
       </Tab.Navigator>
     </NavigationContainer>
   )

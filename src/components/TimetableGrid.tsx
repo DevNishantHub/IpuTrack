@@ -2,27 +2,26 @@
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert } from "react-native"
 import { Lecture, Break } from "../types"
 import { colors, radius } from "../theme"
+import { DAY_NAMES, toMinutes } from "../utils/dateHelpers"
 
-const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-const VISIBLE_DAYS = [1, 2, 3, 4, 5, 6]
+// Sunday is never used on this timetable, so only Mon-Sat render as columns.
+const VISIBLE_DAYS = DAY_NAMES.map((_, i) => i).slice(1)
 
 const TIME_COL_WIDTH = 64
 const DAY_COL_WIDTH = 104
 
-const toMinutes = (t: string) => {
-  const [h, m] = t.split(":").map(Number)
-  return h * 60 + (m || 0)
-}
-
 type Props = {
   lectures: Lecture[]
   breaks: Break[]
-  onEdit: (lecture: Lecture) => void
-  onDelete: (id: string) => void
+  // Omit onEdit/onDelete entirely to render a read-only grid, e.g. for the
+  // locked master timetable view.
+  onEdit?: (lecture: Lecture) => void
+  onDelete?: (id: string) => void
   onEmptyCellPress?: (day: number, startTime: string) => void
 }
 
 export default function TimetableGrid({ lectures, breaks, onEdit, onDelete, onEmptyCellPress }: Props) {
+  const readOnly = !onEdit && !onDelete
   const rowTimes = Array.from(
     new Set([...lectures.map(l => l.startTime), ...breaks.map(b => b.startTime)])
   ).sort((a, b) => toMinutes(a) - toMinutes(b))
@@ -34,6 +33,7 @@ export default function TimetableGrid({ lectures, breaks, onEdit, onDelete, onEm
     breaks.some(b => b.day === day && b.startTime === time)
 
   const confirmDelete = (lecture: Lecture) => {
+    if (!onDelete) return
     Alert.alert(
       "Remove lecture?",
       `${lecture.subject} on ${DAY_NAMES[lecture.day]} at ${lecture.startTime}`,
@@ -82,19 +82,27 @@ export default function TimetableGrid({ lectures, breaks, onEdit, onDelete, onEm
                   <TouchableOpacity
                     key={day}
                     style={[styles.cell, styles.dataCell, lecture && styles.dataCellFilled, { width: DAY_COL_WIDTH }]}
-                    onLongPress={lecture ? () => confirmDelete(lecture) : undefined}
+                    disabled={readOnly && !lecture}
+                    onLongPress={lecture && onDelete ? () => confirmDelete(lecture) : undefined}
                     onPress={
                       lecture
-                        ? () => onEdit(lecture)
+                        ? (onEdit ? () => onEdit(lecture) : undefined)
                         : onEmptyCellPress
                           ? () => onEmptyCellPress(day, time)
                           : undefined
                     }
                   >
                     {lecture && (
-                      <Text style={styles.subjectText} numberOfLines={2}>
-                        {lecture.subject}
-                      </Text>
+                      <>
+                        <Text style={styles.subjectText} numberOfLines={2}>
+                          {lecture.subject}
+                        </Text>
+                        {lecture.note && (
+                          <Text style={styles.noteText} numberOfLines={1}>
+                            {lecture.note}
+                          </Text>
+                        )}
+                      </>
                     )}
                   </TouchableOpacity>
                 )
@@ -103,7 +111,7 @@ export default function TimetableGrid({ lectures, breaks, onEdit, onDelete, onEm
           ))}
         </View>
       </ScrollView>
-      <Text style={styles.hint}>Tap a lecture to edit · long-press to remove</Text>
+      {!readOnly && <Text style={styles.hint}>Tap a lecture to edit · long-press to remove</Text>}
     </View>
   )
 }
@@ -132,6 +140,7 @@ const styles = StyleSheet.create({
   dataCell: { backgroundColor: colors.surface },
   dataCellFilled: { backgroundColor: colors.primaryContainer },
   subjectText: { fontSize: 13, fontWeight: "600", textAlign: "center", color: colors.primaryDark },
+  noteText: { fontSize: 10, color: colors.onSurfaceVariant, textAlign: "center", marginTop: 2 },
   breakCell: { backgroundColor: colors.neutralContainer },
   breakText: { fontSize: 11, fontWeight: "700", color: colors.onSurfaceVariant },
   empty: { color: colors.onSurfaceVariant, marginTop: 8 },

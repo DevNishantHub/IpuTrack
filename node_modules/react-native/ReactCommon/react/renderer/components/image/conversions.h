@@ -9,7 +9,6 @@
 
 #include <unordered_map>
 
-#include <folly/dynamic.h>
 #include <glog/logging.h>
 #include <react/debug/react_native_expect.h>
 #include <react/renderer/core/PropsParserContext.h>
@@ -18,7 +17,7 @@
 
 namespace facebook::react {
 
-inline void fromRawValue(const PropsParserContext &context, const RawValue &value, ImageSource &result)
+inline void fromRawValue(const PropsParserContext & /* context */, const RawValue &value, ImageSource &result)
 {
   if (value.hasType<std::string>()) {
     result = {
@@ -117,7 +116,7 @@ inline std::string toString(const ImageSource &value)
   return "{uri: " + value.uri + "}";
 }
 
-inline void fromRawValue(const PropsParserContext &context, const RawValue &value, ImageResizeMode &result)
+inline void fromRawValue(const PropsParserContext & /* context */, const RawValue &value, ImageResizeMode &result)
 {
   react_native_expect(value.hasType<std::string>());
   if (!value.hasType<std::string>()) {
@@ -163,6 +162,11 @@ inline std::string toString(const ImageResizeMode &value)
       return "repeat";
     case ImageResizeMode::None:
       return "none";
+    default:
+      LOG(ERROR) << "Unsupported ImageResizeMode value: " << (int)value;
+      react_native_expect(false);
+      // "cover" is default in non-Fabric web and iOS
+      return "cover";
   }
 }
 

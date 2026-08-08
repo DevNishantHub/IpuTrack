@@ -1,20 +1,22 @@
 // src/screens/TodayScreen.tsx
 import { useEffect, useState } from "react"
-import { View, Text, StyleSheet, ScrollView } from "react-native"
+import { View, Text, StyleSheet, ScrollView, Modal, TextInput, TouchableOpacity } from "react-native"
 import { SafeAreaView } from "react-native-safe-area-context"
 import { MaterialIcons } from "@expo/vector-icons"
-import { getLectures, getAttendance, saveAttendance } from "../storage/storage"
-import { Lecture, Attendance, AttendanceStatus } from "../types"
+import {
+  getLectures,
+  getAttendance,
+  saveAttendance,
+  getOverridesForDate,
+  saveOverride,
+  clearOverride,
+  pruneExpiredOverrides
+} from "../storage/storage"
+import { Lecture, Attendance, AttendanceStatus, DayOverride } from "../types"
 import { colors, elevation, radius, type as typo, spacing } from "../theme"
 import MdButton from "../components/MdButton"
-
-const getToday = () => new Date().getDay()
-const getTodayDate = () => new Date().toISOString().split("T")[0]
-
-const toMinutes = (t: string) => {
-  const [h, m] = t.split(":").map(Number)
-  return h * 60 + (m || 0)
-}
+import { toMinutes, getToday, getTodayDate } from "../utils/dateHelpers"
+import { CLASS_SUBJECTS, LAB_SUBJECTS } from "../data/subjects"
 
 const STATUS_META: Record<AttendanceStatus, { label: string; color: string; bg: string; icon: keyof typeof MaterialIcons.glyphMap }> = {
   present: { label: "Present", color: colors.success, bg: colors.successContainer, icon: "check-circle" },
@@ -22,29 +24,62 @@ const STATUS_META: Record<AttendanceStatus, { label: string; color: string; bg: 
   cancelled: { label: "Cancelled", color: colors.onSurfaceVariant, bg: colors.neutralContainer, icon: "block" }
 }
 
+// A lecture merged with today's override (if any) for display purposes only.
+// The underlying master lecture id (used for attendance) never changes.
+type DisplayLecture = Lecture & { overridden: boolean }
+
+const ALL_SUBJECTS = [...CLASS_SUBJECTS, ...LAB_SUBJECTS]
+
 export default function TodayScreen() {
-  const [lectures, setLectures] = useState<Lecture[]>([])
+  const [displayLectures, setDisplayLectures] = useState<DisplayLecture[]>([])
   const [todayAttendance, setTodayAttendance] = useState<Attendance[]>([])
+  const [editing, setEditing] = useState<DisplayLecture | null>(null)
+  const [editSubject, setEditSubject] = useState("")
+  const [editTime, setEditTime] = useState("")
+  const [editNote, setEditNote] = useState("")
 
   useEffect(() => {
     load()
   }, [])
 
   const load = async () => {
-    const [allLectures, allAttendance] = await Promise.all([
+    const todayDate = getTodayDate()
+    await pruneExpiredOverrides(todayDate)
+
+    const [allLectures, allAttendance, overrides] = await Promise.all([
       getLectures(),
-      getAttendance()
+      getAttendance(),
+      getOverridesForDate(todayDate)
     ])
-    const todaysLectures = allLectures
+
+    const overrideFor = (id: string) => overrides.find(o => o.lectureId === id)
+
+    const merged: DisplayLecture[] = allLectures
       .filter((l: Lecture) => l.day === getToday())
+      .map(l => {
+        const o = overrideFor(l.id)
+        if (!o) return { ...l, overridden: false }
+        return {
+          ...l,
+          subject: o.subject ?? l.subject,
+          startTime: o.startTime ?? l.startTime,
+          note: o.note ?? l.note,
+          overridden: true
+        }
+      })
+      .filter(l => {
+        const o = overrideFor(l.id)
+        return !(o && o.cancelled)
+      })
       .sort((a, b) => toMinutes(a.startTime) - toMinutes(b.startTime))
-    setLectures(todaysLectures)
-    setTodayAttendance(
-      allAttendance.filter((a: Attendance) => a.date === getTodayDate())
-    )
+
+    setDisplayLectures(merged)
+    setTodayAttendance(allAttendance.filter((a: Attendance) => a.date === todayDate))
   }
 
   const mark = async (lectureId: string, status: AttendanceStatus) => {
+    // Always keyed by the master lectureId + today's date, so attendance
+    // stays consistent even if today's override later changes or expires.
     await saveAttendance({
       id: Date.now().toString(),
       lectureId,
@@ -57,6 +92,49 @@ export default function TodayScreen() {
   const statusFor = (lectureId: string) =>
     todayAttendance.find(a => a.lectureId === lectureId)?.status
 
+  const openEdit = (l: DisplayLecture) => {
+    setEditing(l)
+    setEditSubject(l.subject)
+    setEditTime(l.startTime)
+    setEditNote(l.note ?? "")
+  }
+
+  const closeEdit = () => setEditing(null)
+
+  const saveTodayEdit = async () => {
+    if (!editing) return
+    if (!/^\d{1,2}:\d{2}$/.test(editTime.trim())) return
+    await saveOverride({
+      id: `${editing.id}-${getTodayDate()}`,
+      date: getTodayDate(),
+      lectureId: editing.id,
+      subject: editSubject.trim() || editing.subject,
+      startTime: editTime.trim(),
+      note: editNote.trim() || undefined
+    })
+    setEditing(null)
+    await load()
+  }
+
+  const cancelToday = async () => {
+    if (!editing) return
+    await saveOverride({
+      id: `${editing.id}-${getTodayDate()}`,
+      date: getTodayDate(),
+      lectureId: editing.id,
+      cancelled: true
+    })
+    setEditing(null)
+    await load()
+  }
+
+  const revertToday = async () => {
+    if (!editing) return
+    await clearOverride(editing.id, getTodayDate())
+    setEditing(null)
+    await load()
+  }
+
   const todayName = new Date().toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" })
 
   return (
@@ -64,22 +142,32 @@ export default function TodayScreen() {
       <ScrollView contentContainerStyle={styles.scroll}>
         <Text style={styles.dateLabel}>{todayName}</Text>
 
-        {lectures.length === 0 && (
+        {displayLectures.length === 0 && (
           <View style={styles.emptyCard}>
             <MaterialIcons name="event-available" size={32} color={colors.onSurfaceVariant} />
             <Text style={styles.empty}>No lectures scheduled for today.</Text>
           </View>
         )}
 
-        {lectures.map(l => {
+        {displayLectures.map(l => {
           const current = statusFor(l.id)
           const meta = current ? STATUS_META[current] : null
           return (
             <View key={l.id} style={styles.card}>
               <View style={styles.cardHeader}>
-                <View>
-                  <Text style={styles.title}>{l.subject}</Text>
-                  <Text style={styles.time}>{l.startTime}</Text>
+                <View style={{ flex: 1 }}>
+                  <View style={styles.titleRow}>
+                    <Text style={styles.title}>{l.subject}</Text>
+                    {l.overridden && (
+                      <View style={styles.editedBadge}>
+                        <Text style={styles.editedBadgeText}>Edited for today</Text>
+                      </View>
+                    )}
+                  </View>
+                  <Text style={styles.time}>
+                    {l.startTime}
+                    {l.note ? `  ·  ${l.note}` : ""}
+                  </Text>
                 </View>
                 {meta && (
                   <View style={[styles.badge, { backgroundColor: meta.bg }]}>
@@ -87,6 +175,12 @@ export default function TodayScreen() {
                     <Text style={[styles.badgeText, { color: meta.color }]}>{meta.label}</Text>
                   </View>
                 )}
+                <MdButton
+                  title="Edit"
+                  variant="text"
+                  onPress={() => openEdit(l)}
+                  style={styles.editBtn}
+                />
               </View>
               <View style={styles.buttonRow}>
                 <MdButton
@@ -109,6 +203,47 @@ export default function TodayScreen() {
           )
         })}
       </ScrollView>
+
+      <Modal visible={!!editing} transparent animationType="fade" onRequestClose={closeEdit}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Change just for today</Text>
+            <Text style={styles.modalSubtitle}>
+              This only affects {editing?.subject} today. Your permanent timetable stays the same.
+            </Text>
+
+            <Text style={styles.label}>Subject</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipRow}>
+              {ALL_SUBJECTS.map(s => (
+                <TouchableOpacity
+                  key={s}
+                  style={[styles.chip, editSubject === s && styles.chipActive]}
+                  onPress={() => setEditSubject(s)}
+                >
+                  <Text style={editSubject === s ? styles.chipTextActive : styles.chipText}>{s}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+
+            <Text style={styles.label}>Time (HH:MM)</Text>
+            <TextInput style={styles.input} value={editTime} onChangeText={setEditTime} placeholder="10:00" />
+
+            <Text style={styles.label}>Note (optional)</Text>
+            <TextInput style={styles.input} value={editNote} onChangeText={setEditNote} placeholder="e.g. room 512" />
+
+            <View style={styles.modalButtonsRow}>
+              <MdButton title="Cancel class today" variant="danger" onPress={cancelToday} />
+              {editing?.overridden && (
+                <MdButton title="Revert to normal" variant="text" onPress={revertToday} />
+              )}
+            </View>
+            <View style={styles.modalButtonsRow}>
+              <MdButton title="Close" variant="text" onPress={closeEdit} />
+              <MdButton title="Save for today" variant="filled" onPress={saveTodayEdit} />
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   )
 }
@@ -138,8 +273,17 @@ const styles = StyleSheet.create({
     alignItems: "flex-start",
     marginBottom: spacing(3)
   },
+  titleRow: { flexDirection: "row", alignItems: "center", gap: spacing(2), flexWrap: "wrap" },
   title: { ...typo.title },
   time: { ...typo.body, color: colors.onSurfaceVariant, marginTop: 2 },
+  editedBadge: {
+    backgroundColor: colors.primaryContainer,
+    borderRadius: radius.full,
+    paddingVertical: 2,
+    paddingHorizontal: 8
+  },
+  editedBadgeText: { fontSize: 10, fontWeight: "600", color: colors.primaryDark },
+  editBtn: { paddingHorizontal: 8 },
   badge: {
     flexDirection: "row",
     alignItems: "center",
@@ -149,5 +293,44 @@ const styles = StyleSheet.create({
     borderRadius: radius.full
   },
   badgeText: { fontSize: 12, fontWeight: "600" },
-  buttonRow: { flexDirection: "row", gap: spacing(2), flexWrap: "wrap" }
+  buttonRow: { flexDirection: "row", gap: spacing(2), flexWrap: "wrap" },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.4)",
+    justifyContent: "center",
+    padding: spacing(5)
+  },
+  modalCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    padding: spacing(5)
+  },
+  modalTitle: { ...typo.title, marginBottom: spacing(1) },
+  modalSubtitle: { ...typo.body, color: colors.onSurfaceVariant, marginBottom: spacing(3) },
+  label: { ...typo.label, marginTop: spacing(2), marginBottom: spacing(1) },
+  input: {
+    borderWidth: 1,
+    borderColor: colors.outline,
+    padding: spacing(2.5),
+    borderRadius: radius.sm,
+    color: colors.onSurface
+  },
+  modalButtonsRow: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    gap: spacing(2),
+    marginTop: spacing(4)
+  },
+  chipRow: { marginTop: spacing(1) },
+  chip: {
+    paddingVertical: 6,
+    paddingHorizontal: 14,
+    borderRadius: radius.full,
+    borderWidth: 1,
+    borderColor: colors.outline,
+    marginRight: spacing(2)
+  },
+  chipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  chipText: { color: colors.onSurface },
+  chipTextActive: { color: colors.onPrimary, fontWeight: "600" }
 })

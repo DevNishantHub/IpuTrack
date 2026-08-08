@@ -25,34 +25,38 @@ type DevToolsColor =
   | 'warning'
   | 'error';
 
+declare interface ConsoleTask {
+  run<T>(f: () => T): T;
+}
+
 // $FlowExpectedError[libdef-override] Flow core definitions are incomplete.
 declare var console: {
   // Logging
-  log(...data: $ReadOnlyArray<mixed>): void,
-  trace(...data: $ReadOnlyArray<mixed>): void,
-  debug(...data: $ReadOnlyArray<mixed>): void,
-  info(...data: $ReadOnlyArray<mixed>): void,
-  warn(...data: $ReadOnlyArray<mixed>): void,
-  error(...data: $ReadOnlyArray<mixed>): void,
+  log(...data: ReadonlyArray<unknown>): void,
+  trace(...data: ReadonlyArray<unknown>): void,
+  debug(...data: ReadonlyArray<unknown>): void,
+  info(...data: ReadonlyArray<unknown>): void,
+  warn(...data: ReadonlyArray<unknown>): void,
+  error(...data: ReadonlyArray<unknown>): void,
 
   // Grouping
-  group(...data: $ReadOnlyArray<mixed>): void,
-  groupCollapsed(...data: $ReadOnlyArray<mixed>): void,
+  group(...data: ReadonlyArray<unknown>): void,
+  groupCollapsed(...data: ReadonlyArray<unknown>): void,
   groupEnd(): void,
 
   // Printing
   table(
     tabularData:
-      | $ReadOnly<{[key: string]: mixed, ...}>
-      | $ReadOnlyArray<$ReadOnly<{[key: string]: mixed, ...}>>
-      | $ReadOnlyArray<$ReadOnlyArray<mixed>>,
+      | Readonly<{[key: string]: unknown, ...}>
+      | ReadonlyArray<Readonly<{[key: string]: unknown, ...}>>
+      | ReadonlyArray<ReadonlyArray<unknown>>,
   ): void,
-  dir(...data: $ReadOnlyArray<mixed>): void,
-  dirxml(...data: $ReadOnlyArray<mixed>): void,
+  dir(...data: ReadonlyArray<unknown>): void,
+  dirxml(...data: ReadonlyArray<unknown>): void,
   clear(): void,
 
   // Utilities
-  assert(condition: mixed, ...data: $ReadOnlyArray<mixed>): void,
+  assert(condition: unknown, ...data: ReadonlyArray<unknown>): void,
 
   // Profiling
   profile(name?: string): void,
@@ -72,8 +76,11 @@ declare var console: {
     trackName?: string,
     trackGroup?: string,
     color?: DevToolsColor,
-    detail?: {[string]: mixed},
+    detail?: {[string]: unknown},
   ): void,
+
+  // Stack tagging
+  createTask(label: string): ConsoleTask,
 
   ...
 };
@@ -101,18 +108,18 @@ declare class PerformanceEntry {
   entryType: string;
   name: string;
   startTime: DOMHighResTimeStamp;
-  toJSON(): string;
+  toJSON(): {[string]: unknown};
 }
 
 // https://w3c.github.io/user-timing/#performancemark
 declare class PerformanceMark extends PerformanceEntry {
   constructor(name: string, markOptions?: PerformanceMarkOptions): void;
-  +detail: mixed;
+  +detail: unknown;
 }
 
 // https://w3c.github.io/user-timing/#performancemeasure
 declare class PerformanceMeasure extends PerformanceEntry {
-  +detail: mixed;
+  +detail: unknown;
 }
 
 // https://w3c.github.io/server-timing/#the-performanceservertiming-interface
@@ -120,7 +127,7 @@ declare class PerformanceServerTiming {
   description: string;
   duration: DOMHighResTimeStamp;
   name: string;
-  toJSON(): string;
+  toJSON(): {[string]: unknown};
 }
 
 // https://www.w3.org/TR/resource-timing-2/#sec-performanceresourcetiming
@@ -165,17 +172,17 @@ declare class TaskAttributionTiming extends PerformanceEntry {
 
 // https://w3c.github.io/longtasks/#sec-PerformanceLongTaskTiming
 declare class PerformanceLongTaskTiming extends PerformanceEntry {
-  attribution: $ReadOnlyArray<TaskAttributionTiming>;
+  attribution: ReadonlyArray<TaskAttributionTiming>;
 }
 
 // https://www.w3.org/TR/user-timing/#extensions-performance-interface
 declare type PerformanceMarkOptions = {
-  detail?: mixed,
+  detail?: unknown,
   startTime?: number,
 };
 
 declare type PerformanceMeasureOptions = {
-  detail?: mixed,
+  detail?: unknown,
   duration?: number,
   end?: number | string,
   start?: number | string,
@@ -217,7 +224,7 @@ declare class Performance {
     endMark?: string,
   ): PerformanceMeasure;
   now(): DOMHighResTimeStamp;
-  toJSON(): string;
+  toJSON(): {[string]: unknown};
 }
 
 declare var performance: Performance;
@@ -242,7 +249,7 @@ declare class PerformanceObserver {
     callback: (
       entries: PerformanceObserverEntryList,
       observer: PerformanceObserver,
-    ) => mixed,
+    ) => unknown,
   ): void;
 
   disconnect(): void;
@@ -320,6 +327,98 @@ declare class DOMRectList {
   [index: number]: DOMRect;
 }
 
+declare class MutationRecord {
+  // Always an empty NodeList for `attributes` and `characterData` mutations.
+  // React Native currently only supports `childList`, so this contains the
+  // added nodes for that mutation type.
+  +addedNodes: NodeList<Node>;
+  // Always `null` in React Native (only `childList` mutations are supported).
+  +attributeName: null;
+  // Always `null` in React Native (only `childList` mutations are supported).
+  +nextSibling: null;
+  // Always `null` in React Native (only `childList` mutations are supported,
+  // and `attributeOldValue`/`characterDataOldValue` are not supported).
+  +oldValue: null;
+  // Always `null` in React Native (only `childList` mutations are supported).
+  +previousSibling: null;
+  // Always an empty NodeList for `attributes` and `characterData` mutations.
+  // React Native currently only supports `childList`, so this contains the
+  // removed nodes for that mutation type.
+  +removedNodes: NodeList<Node>;
+  +target: Node;
+  // React Native currently only supports `childList` mutations.
+  +type: 'childList';
+}
+
+// React Native currently only supports `childList` mutations, so `childList`
+// is required and must be `true`. The `attributes`/`attributeFilter`/
+// `attributeOldValue`/`characterData`/`characterDataOldValue` options are not
+// supported and will throw if provided.
+declare type MutationObserverInit = {
+  +childList: true,
+  +subtree?: boolean,
+  ...
+};
+
+declare class MutationObserver {
+  constructor(
+    callback: (
+      arr: Array<MutationRecord>,
+      observer: MutationObserver,
+    ) => unknown,
+  ): void;
+  disconnect(): void;
+  observe(target: Node, options: MutationObserverInit): void;
+}
+
+declare type IntersectionObserverEntry = {
+  +boundingClientRect: DOMRectReadOnly,
+  +intersectionRatio: number,
+  +intersectionRect: DOMRectReadOnly,
+  +isIntersecting: boolean,
+  // Always non-null in React Native.
+  +rootBounds: DOMRectReadOnly,
+  // React Native-specific extension. Equivalent to `intersectionRatio` but
+  // computed against the `rnRootThreshold` root-relative thresholds.
+  +rnRootIntersectionRatio: number,
+  +target: Element,
+  +time: DOMHighResTimeStamp,
+  ...
+};
+
+declare type IntersectionObserverCallback = (
+  entries: Array<IntersectionObserverEntry>,
+  observer: IntersectionObserver,
+) => unknown;
+
+declare type IntersectionObserverOptions = {
+  root?: Node | null,
+  rootMargin?: string,
+  threshold?: number | Array<number>,
+  // React Native-specific extension. Thresholds expressed as a fraction of the
+  // root's size (instead of the target's size).
+  rnRootThreshold?: number | Array<number>,
+  ...
+};
+
+// The `delay`, `scrollMargin` and `trackVisibility` options are not supported
+// in React Native and will throw if provided.
+declare class IntersectionObserver {
+  constructor(
+    callback: IntersectionObserverCallback,
+    options?: IntersectionObserverOptions,
+  ): void;
+  disconnect(): void;
+  observe(target: Element): void;
+  +root: Element | null;
+  +rootMargin: string;
+  // React Native-specific extension. The thresholds expressed as a fraction of
+  // the root's size (set via the `rnRootThreshold` option).
+  +rnRootThresholds: ReadonlyArray<number> | null;
+  +thresholds: ReadonlyArray<number>;
+  unobserve(target: Element): void;
+}
+
 declare class CloseEvent extends Event {
   code: number;
   reason: string;
@@ -338,10 +437,10 @@ declare class WebSocket extends EventTarget {
   CONNECTING: 0;
   constructor(url: string, protocols?: string | Array<string>): void;
   extensions: string;
-  onclose: (ev: CloseEvent) => mixed;
-  onerror: (ev: $FlowFixMe) => mixed;
-  onmessage: (ev: MessageEvent) => mixed;
-  onopen: (ev: $FlowFixMe) => mixed;
+  onclose: (ev: CloseEvent) => unknown;
+  onerror: (ev: $FlowFixMe) => unknown;
+  onmessage: (ev: MessageEvent) => unknown;
+  onopen: (ev: $FlowFixMe) => unknown;
   static OPEN: 1;
   OPEN: 1;
   protocol: string;
@@ -371,7 +470,7 @@ declare class XMLHttpRequest extends EventTarget {
   onloadend: ProgressEventHandler;
   onloadstart: ProgressEventHandler;
   onprogress: ProgressEventHandler;
-  onreadystatechange: (ev: $FlowFixMe) => mixed;
+  onreadystatechange: (ev: $FlowFixMe) => unknown;
   ontimeout: ProgressEventHandler;
   open(
     method: string,
@@ -434,7 +533,7 @@ declare class Headers {
       value: string,
       name: string,
       headers: Headers,
-    ) => mixed,
+    ) => unknown,
     thisArg: This,
   ): void;
   get(name: string): null | string;
@@ -464,7 +563,7 @@ declare class URLSearchParams {
       value: string,
       name: string,
       params: URLSearchParams,
-    ) => mixed,
+    ) => unknown,
     thisArg: This,
   ): void;
   get(name: string): null | string;
@@ -602,12 +701,13 @@ declare class AbortController {
 }
 
 declare class AbortSignal extends EventTarget {
-  abort(reason?: $FlowFixMe): AbortSignal;
+  static abort(reason?: $FlowFixMe): AbortSignal;
+  static any(signals: Iterable<AbortSignal>): AbortSignal;
   +aborted: boolean;
-  onabort: (event: Event) => mixed;
+  onabort: (event: Event) => unknown;
   +reason: $FlowFixMe;
   throwIfAborted(): void;
-  timeout(time: number): AbortSignal;
+  static timeout(time: number): AbortSignal;
 }
 
 declare function fetch(

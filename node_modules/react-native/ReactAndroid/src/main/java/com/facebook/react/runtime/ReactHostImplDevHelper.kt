@@ -16,8 +16,8 @@ import com.facebook.react.bridge.ReactContext
 import com.facebook.react.common.annotations.FrameworkAPI
 import com.facebook.react.common.annotations.UnstableReactNativeAPI
 import com.facebook.react.devsupport.ReactInstanceDevHelper
-import com.facebook.react.devsupport.interfaces.TracingState
-import com.facebook.react.devsupport.interfaces.TracingStateProvider
+import com.facebook.react.devsupport.inspector.TracingState
+import com.facebook.react.devsupport.inspector.TracingStateProvider
 import com.facebook.react.devsupport.perfmonitor.PerfMonitorDevHelper
 import com.facebook.react.devsupport.perfmonitor.PerfMonitorInspectorTarget
 import com.facebook.react.interfaces.TaskInterface
@@ -70,7 +70,14 @@ internal class ReactHostImplDevHelper(private val delegate: ReactHostImpl) :
   }
 
   override fun destroyRootView(rootView: View) {
-    // Not implemented, only referenced by BridgeDevSupportManager
+    val surface = (rootView as? ReactSurfaceView)?.surface ?: return
+    // stop() synchronously removes the surface from ReactHostImpl.attachedSurfaces via
+    // detachSurface(), then asynchronously tears down the React component tree.
+    // detach() severs the surface's back-reference to the host.
+    // clear() removes child views from the ReactSurfaceView.
+    surface.stop()
+    surface.detach()
+    surface.clear()
   }
 
   override fun reload(reason: String) {
@@ -81,6 +88,6 @@ internal class ReactHostImplDevHelper(private val delegate: ReactHostImpl) :
       delegate.loadBundle(bundleLoader)
 
   override fun getTracingState(): TracingState {
-    return delegate.reactHostInspectorTarget?.getTracingState() ?: TracingState.ENABLEDINCDPMODE
+    return delegate.reactHostInspectorTarget?.getTracingState() ?: TracingState.ENABLED_IN_CDP_MODE
   }
 }

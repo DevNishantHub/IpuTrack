@@ -24,9 +24,9 @@
 #include <fbjni/fbjni.h>
 #include <glog/logging.h>
 
+#include <algorithm>
 #include <cfenv>
 #include <cmath>
-#include <unordered_set>
 #include <vector>
 
 namespace facebook::react {
@@ -52,7 +52,90 @@ void FabricMountingManager::onSurfaceStop(SurfaceId surfaceId) {
   allocatedViewRegistry_.erase(surfaceId);
 }
 
+bool FabricMountingManager::isViewAllocated(SurfaceId surfaceId, Tag tag) {
+  std::lock_guard lock(allocatedViewsMutex_);
+  auto it = allocatedViewRegistry_.find(surfaceId);
+  if (it == allocatedViewRegistry_.end()) {
+    return false;
+  }
+  return it->second.count(tag) > 0;
+}
+
 namespace {
+
+#ifdef REACT_NATIVE_DEBUG
+// List of layout-only props extracted from ViewProps.kt used to filter out
+// component props from Props 1.5 to validate the Props 2.0 output
+inline bool isLayoutOnlyProp(const std::string& propName) {
+  static const std::vector<std::string> layoutOnlyProps = {
+      // Flexbox Alignment
+      "alignItems",
+      "alignSelf",
+      "alignContent",
+
+      // Flexbox Properties
+      "flex",
+      "flexBasis",
+      "flexDirection",
+      "flexGrow",
+      "flexShrink",
+      "flexWrap",
+      "justifyContent",
+
+      // Gaps
+      "rowGap",
+      "columnGap",
+      "gap",
+
+      // Display & Position
+      "display",
+      "position",
+
+      // Positioning
+      "right",
+      "top",
+      "bottom",
+      "left",
+      "start",
+      "end",
+
+      // Dimensions
+      "width",
+      "height",
+      "minWidth",
+      "maxWidth",
+      "minHeight",
+      "maxHeight",
+
+      // Margins
+      "margin",
+      "marginVertical",
+      "marginHorizontal",
+      "marginLeft",
+      "marginRight",
+      "marginTop",
+      "marginBottom",
+      "marginStart",
+      "marginEnd",
+
+      // Paddings
+      "padding",
+      "paddingVertical",
+      "paddingHorizontal",
+      "paddingLeft",
+      "paddingRight",
+      "paddingTop",
+      "paddingBottom",
+      "paddingStart",
+      "paddingEnd",
+
+      // Other
+      "collapsable",
+  };
+  return std::find(layoutOnlyProps.begin(), layoutOnlyProps.end(), propName) !=
+      layoutOnlyProps.end();
+}
+#endif
 
 inline int getIntBufferSizeForType(CppMountItem::Type mountItemType) {
   switch (mountItemType) {
@@ -232,8 +315,29 @@ jni::local_ref<jobject> getProps(
       strcmp(
           newShadowView.componentName,
           newProps->getDiffPropsImplementationTarget()) == 0) {
-    return ReadableNativeMap::newObjectCxxArgs(
-        newProps->getDiffProps(oldProps));
+    auto diff = newProps->getDiffProps(oldProps);
+
+#ifdef REACT_NATIVE_DEBUG
+    if (oldProps != nullptr) {
+      auto controlDiff =
+          diffDynamicProps(oldProps->rawProps, newProps->rawProps);
+
+      for (const auto& [prop, value] : controlDiff.items()) {
+        if (diff.count(prop) == 0) {
+          // Skip layout-only props since they are not included in Props 2.0
+          if (!isLayoutOnlyProp(prop.asString())) {
+            LOG(ERROR) << "Props diff validation failed: Props 1.5 has prop '"
+                       << prop.asString()
+                       << "' = " << (value != nullptr ? value : "NULL")
+                       << " that Props 2.0 doesn't have for component "
+                       << newShadowView.componentName;
+          }
+        }
+      }
+    }
+#endif
+
+    return ReadableNativeMap::newObjectCxxArgs(std::move(diff));
   }
   if (ReactNativeFeatureFlags::enableAccumulatedUpdatesInRawPropsAndroid()) {
     if (oldProps == nullptr) {
@@ -931,6 +1035,20 @@ void FabricMountingManager::destroyUnmountedShadowNode(
   auto tag = family.getTag();
   auto surfaceId = family.getSurfaceId();
 
+  // Remove from allocatedViewRegistry so that executeMount does not skip
+  // the Create mount item for this tag. Without this, if the view was
+  // preallocated and then destroyed (e.g. due to a superseded concurrent
+  // render), executeMount would skip the Create because allocatedViewTags
+  // still contains the tag, but the Java side no longer has the view in
+  // tagToViewState (it was deleted by destroyUnmountedView below).
+  {
+    std::lock_guard allocatedViewsLock(allocatedViewsMutex_);
+    auto allocatedViewsIterator = allocatedViewRegistry_.find(surfaceId);
+    if (allocatedViewsIterator != allocatedViewRegistry_.end()) {
+      allocatedViewsIterator->second.erase(tag);
+    }
+  }
+
   // ThreadScope::WithClassLoader is necessary because
   // destroyUnmountedShadowNode is being called from a destructor thread
   jni::ThreadScope::WithClassLoader([&]() {
@@ -1109,6 +1227,37 @@ void FabricMountingManager::synchronouslyUpdateViewOnUIThread(
   auto propsMap = reinterpret_cast<ReadableMap::javaobject>(
       ReadableNativeMap::newObjectCxxArgs(props).release());
   synchronouslyUpdateViewOnUIThreadJNI(javaUIManager_, viewTag, propsMap);
+}
+
+void FabricMountingManager::captureViewSnapshot(Tag tag, SurfaceId surfaceId) {
+  static auto captureViewSnapshotJNI =
+      JFabricUIManager::javaClassStatic()->getMethod<void(jint, jint)>(
+          "captureViewSnapshot");
+  captureViewSnapshotJNI(javaUIManager_, tag, surfaceId);
+}
+
+void FabricMountingManager::setViewSnapshot(
+    Tag sourceTag,
+    Tag targetTag,
+    SurfaceId surfaceId) {
+  static auto setViewSnapshotJNI =
+      JFabricUIManager::javaClassStatic()->getMethod<void(jint, jint, jint)>(
+          "setViewSnapshot");
+  setViewSnapshotJNI(javaUIManager_, sourceTag, targetTag, surfaceId);
+}
+
+void FabricMountingManager::clearPendingSnapshots() {
+  static auto clearPendingSnapshotsJNI =
+      JFabricUIManager::javaClassStatic()->getMethod<void()>(
+          "clearPendingSnapshots");
+  clearPendingSnapshotsJNI(javaUIManager_);
+}
+
+void FabricMountingManager::scheduleReactRevisionMerge(SurfaceId surfaceId) {
+  static const auto scheduleReactRevisionMerge =
+      JFabricUIManager::javaClassStatic()->getMethod<void(int32_t)>(
+          "scheduleReactRevisionMerge");
+  scheduleReactRevisionMerge(javaUIManager_, surfaceId);
 }
 
 } // namespace facebook::react
