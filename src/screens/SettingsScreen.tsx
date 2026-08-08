@@ -6,8 +6,18 @@ import * as Clipboard from "expo-clipboard"
 import { MaterialIcons } from "@expo/vector-icons"
 import MdButton from "../components/MdButton"
 import { colors, elevation, radius, type as typo, spacing } from "../theme"
-import { isTimetableImported, setMasterTimetable, getAttendanceThreshold, setAttendanceThreshold, DEFAULT_ATTENDANCE_THRESHOLD } from "../storage/storage"
+import {
+  isTimetableImported,
+  setMasterTimetable,
+  getAttendanceThreshold,
+  setAttendanceThreshold,
+  DEFAULT_ATTENDANCE_THRESHOLD,
+  getAttendance,
+  getLectures,
+  saveAttendanceBulk
+} from "../storage/storage"
 import { TIMETABLE_IMPORT_PROMPT, validateImportedTimetable } from "../utils/timetableImport"
+import { attendanceToCsv, parseAttendanceCsv } from "../utils/csv"
 
 export default function SettingsScreen() {
   const [imported, setImported] = useState(false)
@@ -16,6 +26,12 @@ export default function SettingsScreen() {
   const [error, setError] = useState<string | null>(null)
   const [threshold, setThreshold] = useState(DEFAULT_ATTENDANCE_THRESHOLD)
   const [thresholdInput, setThresholdInput] = useState("")
+
+  const [showCsvImport, setShowCsvImport] = useState(false)
+  const [csvInput, setCsvInput] = useState("")
+  const [csvError, setCsvError] = useState<string | null>(null)
+  const [exporting, setExporting] = useState(false)
+  const [importing, setImporting] = useState(false)
 
   useEffect(() => {
     isTimetableImported().then(setImported).catch(err => {
@@ -82,6 +98,50 @@ export default function SettingsScreen() {
     } catch (err) {
       console.warn("Failed to save attendance threshold:", err)
       Alert.alert("Couldn't save", "Something went wrong saving your threshold. Please try again.")
+    }
+  }
+
+  const exportAttendanceCsv = async () => {
+    setExporting(true)
+    try {
+      const [attendance, lectures] = await Promise.all([getAttendance(), getLectures()])
+      if (attendance.length === 0) {
+        Alert.alert("Nothing to export", "You don't have any attendance records yet.")
+        return
+      }
+      const csv = attendanceToCsv(attendance, lectures)
+      await Clipboard.setStringAsync(csv)
+      Alert.alert(
+        "Copied to clipboard",
+        `${attendance.length} attendance records copied as CSV. Paste them into Sheets, Excel, Notes, or an email to save/edit them.`
+      )
+    } catch (err) {
+      console.warn("Failed to export attendance CSV:", err)
+      Alert.alert("Couldn't export", "Something went wrong preparing your CSV. Please try again.")
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  const importAttendanceCsv = async () => {
+    const result = parseAttendanceCsv(csvInput)
+    if (!result.ok) {
+      setCsvError(result.error)
+      return
+    }
+    setImporting(true)
+    try {
+      await saveAttendanceBulk(result.entries)
+      setShowCsvImport(false)
+      setCsvInput("")
+      setCsvError(null)
+      const skippedNote = result.skippedCount > 0 ? ` ${result.skippedCount} row(s) were skipped (bad date/status/id).` : ""
+      Alert.alert("Import complete", `${result.entries.length} record(s) saved.${skippedNote}`)
+    } catch (err) {
+      console.warn("Failed to import attendance CSV:", err)
+      Alert.alert("Couldn't import", "Something went wrong saving these records. Please try again.")
+    } finally {
+      setImporting(false)
     }
   }
 
@@ -190,6 +250,87 @@ export default function SettingsScreen() {
             keyboardType="decimal-pad"
           />
           <MdButton title="Save threshold" variant="filled" onPress={saveThreshold} style={styles.actionBtn} />
+        </View>
+
+        <Text style={styles.sectionLabel}>DATA</Text>
+
+        <View style={styles.card}>
+          <View style={styles.cardHeader}>
+            <MaterialIcons name="table-chart" size={20} color={colors.onSurfaceVariant} />
+            <Text style={styles.cardTitle}>Export attendance</Text>
+          </View>
+          <Text style={styles.cardBody}>
+            Copies all your attendance records as CSV so you can paste them into a spreadsheet,
+            back them up, or share them.
+          </Text>
+          <MdButton
+            title={exporting ? "Copying..." : "Copy as CSV"}
+            variant="filled"
+            onPress={exportAttendanceCsv}
+            disabled={exporting}
+            style={styles.actionBtn}
+          />
+        </View>
+
+        <View style={styles.card}>
+          <View style={styles.cardHeader}>
+            <MaterialIcons name="upload-file" size={20} color={colors.onSurfaceVariant} />
+            <Text style={styles.cardTitle}>Import attendance</Text>
+          </View>
+          <Text style={styles.cardBody}>
+            Paste edited or backed-up CSV data back in. Only the date, lectureId, and status
+            columns are read - existing records for the same lecture and date are overwritten.
+          </Text>
+
+          {!showCsvImport && (
+            <MdButton
+              title="Paste CSV"
+              variant="outlined"
+              onPress={() => setShowCsvImport(true)}
+              style={styles.actionBtn}
+            />
+          )}
+
+          {showCsvImport && (
+            <>
+              <TextInput
+                style={styles.jsonInput}
+                value={csvInput}
+                onChangeText={t => {
+                  setCsvInput(t)
+                  setCsvError(null)
+                }}
+                placeholder={"date,lectureId,subject,startTime,status\n2026-01-05,lec_1,AI,08:30,present"}
+                placeholderTextColor={colors.onSurfaceVariant}
+                multiline
+                textAlignVertical="top"
+                autoCapitalize="none"
+              />
+              {csvError && (
+                <View style={styles.errorBox}>
+                  <MaterialIcons name="error-outline" size={16} color={colors.error} />
+                  <Text style={styles.errorText}>{csvError}</Text>
+                </View>
+              )}
+              <View style={styles.row}>
+                <MdButton
+                  title="Cancel"
+                  variant="text"
+                  onPress={() => {
+                    setShowCsvImport(false)
+                    setCsvInput("")
+                    setCsvError(null)
+                  }}
+                />
+                <MdButton
+                  title={importing ? "Importing..." : "Import"}
+                  variant="filled"
+                  onPress={importAttendanceCsv}
+                  disabled={importing}
+                />
+              </View>
+            </>
+          )}
         </View>
       </ScrollView>
     </SafeAreaView>

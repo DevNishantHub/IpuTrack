@@ -121,6 +121,20 @@ export const saveAttendance = async (entry: Attendance): Promise<void> => {
   await AsyncStorage.setItem(ATTENDANCE_KEY, JSON.stringify(updated))
 }
 
+// Merges many attendance entries in one read+write (used by CSV import),
+// instead of calling saveAttendance() per row which would do N sequential
+// AsyncStorage read-modify-writes. Entries with the same lectureId+date as
+// an incoming one are replaced, same "last write wins" semantics as
+// saveAttendance.
+export const saveAttendanceBulk = async (entries: Attendance[]): Promise<void> => {
+  if (entries.length === 0) return
+  const data = await getAttendance()
+  const incomingKey = (e: Attendance) => `${e.lectureId}|${e.date}`
+  const incomingKeys = new Set(entries.map(incomingKey))
+  const kept = data.filter(e => !incomingKeys.has(incomingKey(e)))
+  await AsyncStorage.setItem(ATTENDANCE_KEY, JSON.stringify([...kept, ...entries]))
+}
+
 export const clearAllData = async (): Promise<void> => {
   await AsyncStorage.multiRemove([
     LECTURES_KEY,

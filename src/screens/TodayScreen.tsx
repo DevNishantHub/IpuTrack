@@ -15,7 +15,14 @@ import {
 import { Lecture, Attendance, AttendanceStatus, DayOverride } from "../types"
 import { colors, elevation, radius, type as typo, spacing } from "../theme"
 import MdButton from "../components/MdButton"
-import { toMinutes, getToday, getTodayDate } from "../utils/dateHelpers"
+import {
+  toMinutes,
+  getTodayDate,
+  getDayOfWeek,
+  addDaysToDate,
+  isValidDateString,
+  formatDisplayDate
+} from "../utils/dateHelpers"
 import { checkLowAttendanceAndNotify } from "../utils/attendance"
 import { CLASS_SUBJECTS, LAB_SUBJECTS } from "../data/subjects"
 
@@ -32,8 +39,15 @@ type DisplayLecture = Lecture & { overridden: boolean }
 const ALL_SUBJECTS = [...CLASS_SUBJECTS, ...LAB_SUBJECTS]
 
 export default function TodayScreen() {
+  // The date currently being viewed/marked - defaults to today, but can be
+  // navigated backwards (or forwards, for preview) to backfill missed days.
+  const [selectedDate, setSelectedDate] = useState(getTodayDate())
+  const [showDateJump, setShowDateJump] = useState(false)
+  const [dateJumpInput, setDateJumpInput] = useState("")
+  const [dateJumpError, setDateJumpError] = useState<string | null>(null)
+
   const [displayLectures, setDisplayLectures] = useState<DisplayLecture[]>([])
-  const [todayAttendance, setTodayAttendance] = useState<Attendance[]>([])
+  const [dayAttendance, setDayAttendance] = useState<Attendance[]>([])
   const [editing, setEditing] = useState<DisplayLecture | null>(null)
   const [editSubject, setEditSubject] = useState("")
   const [editTime, setEditTime] = useState("")
@@ -41,22 +55,27 @@ export default function TodayScreen() {
 
   useEffect(() => {
     load()
-  }, [])
+    // Re-load whenever the viewed date changes, so switching days always
+    // shows that day's lectures/overrides/attendance.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDate])
 
   const load = async (preloaded?: { allLectures: Lecture[]; allAttendance: Attendance[] }) => {
     const todayDate = getTodayDate()
+    // Overrides only ever apply to "today" by design (they auto-expire), so
+    // pruning is still anchored to the real today, not the viewed date.
     await pruneExpiredOverrides(todayDate)
 
     const [allLectures, allAttendance, overrides] = await Promise.all([
       preloaded ? Promise.resolve(preloaded.allLectures) : getLectures(),
       preloaded ? Promise.resolve(preloaded.allAttendance) : getAttendance(),
-      getOverridesForDate(todayDate)
+      getOverridesForDate(selectedDate)
     ])
 
     const overrideFor = (id: string) => overrides.find(o => o.lectureId === id)
 
     const merged: DisplayLecture[] = allLectures
-      .filter((l: Lecture) => l.day === getToday())
+      .filter((l: Lecture) => l.day === getDayOfWeek(selectedDate))
       .map(l => {
         const o = overrideFor(l.id)
         if (!o) return { ...l, overridden: false }
@@ -75,16 +94,16 @@ export default function TodayScreen() {
       .sort((a, b) => toMinutes(a.startTime) - toMinutes(b.startTime))
 
     setDisplayLectures(merged)
-    setTodayAttendance(allAttendance.filter((a: Attendance) => a.date === todayDate))
+    setDayAttendance(allAttendance.filter((a: Attendance) => a.date === selectedDate))
   }
 
   const mark = async (lectureId: string, status: AttendanceStatus) => {
-    // Always keyed by the master lectureId + today's date, so attendance
-    // stays consistent even if today's override later changes or expires.
+    // Always keyed by the master lectureId + the viewed date, so backfilling
+    // a past day writes attendance against that day, not today.
     await saveAttendance({
       id: Date.now().toString(),
       lectureId,
-      date: getTodayDate(),
+      date: selectedDate,
       status
     })
 
@@ -104,7 +123,25 @@ export default function TodayScreen() {
   }
 
   const statusFor = (lectureId: string) =>
-    todayAttendance.find(a => a.lectureId === lectureId)?.status
+    dayAttendance.find(a => a.lectureId === lectureId)?.status
+
+  const goToDate = (dateStr: string) => {
+    setSelectedDate(dateStr)
+    setShowDateJump(false)
+    setDateJumpError(null)
+  }
+
+  const submitDateJump = () => {
+    const trimmed = dateJumpInput.trim()
+    if (!isValidDateString(trimmed)) {
+      setDateJumpError("Enter a date as YYYY-MM-DD")
+      return
+    }
+    goToDate(trimmed)
+    setDateJumpInput("")
+  }
+
+  const isViewingToday = selectedDate === getTodayDate()
 
   const openEdit = (l: DisplayLecture) => {
     setEditing(l)
@@ -119,8 +156,8 @@ export default function TodayScreen() {
     if (!editing) return
     if (!/^\d{1,2}:\d{2}$/.test(editTime.trim())) return
     await saveOverride({
-      id: `${editing.id}-${getTodayDate()}`,
-      date: getTodayDate(),
+      id: `${editing.id}-${selectedDate}`,
+      date: selectedDate,
       lectureId: editing.id,
       subject: editSubject.trim() || editing.subject,
       startTime: editTime.trim(),
@@ -133,8 +170,8 @@ export default function TodayScreen() {
   const cancelToday = async () => {
     if (!editing) return
     await saveOverride({
-      id: `${editing.id}-${getTodayDate()}`,
-      date: getTodayDate(),
+      id: `${editing.id}-${selectedDate}`,
+      date: selectedDate,
       lectureId: editing.id,
       cancelled: true
     })
@@ -144,17 +181,84 @@ export default function TodayScreen() {
 
   const revertToday = async () => {
     if (!editing) return
-    await clearOverride(editing.id, getTodayDate())
+    await clearOverride(editing.id, selectedDate)
     setEditing(null)
     await load()
   }
 
-  const todayName = new Date().toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" })
+  const viewedDateLabel = new Date(`${selectedDate}T00:00:00`).toLocaleDateString(undefined, {
+    weekday: "long",
+    month: "short",
+    day: "numeric"
+  })
 
   return (
     <SafeAreaView style={styles.container} edges={["left", "right"]}>
       <ScrollView contentContainerStyle={styles.scroll}>
-        <Text style={styles.dateLabel}>{todayName}</Text>
+        <View style={styles.dateNavRow}>
+          <TouchableOpacity
+            onPress={() => goToDate(addDaysToDate(selectedDate, -1))}
+            style={styles.dateNavArrow}
+          >
+            <MaterialIcons name="chevron-left" size={22} color={colors.onSurfaceVariant} />
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.dateNavLabelWrap}
+            onPress={() => {
+              setDateJumpInput(selectedDate)
+              setShowDateJump(v => !v)
+            }}
+          >
+            <Text style={styles.dateLabel}>{formatDisplayDate(selectedDate)}</Text>
+            <Text style={styles.dateSubLabel}>{viewedDateLabel}</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            onPress={() => goToDate(addDaysToDate(selectedDate, 1))}
+            style={styles.dateNavArrow}
+          >
+            <MaterialIcons name="chevron-right" size={22} color={colors.onSurfaceVariant} />
+          </TouchableOpacity>
+        </View>
+
+        {!isViewingToday && (
+          <MdButton
+            title="Back to today"
+            variant="text"
+            onPress={() => goToDate(getTodayDate())}
+            style={styles.backToTodayBtn}
+          />
+        )}
+
+        {showDateJump && (
+          <View style={styles.dateJumpCard}>
+            <Text style={styles.label}>Jump to date (YYYY-MM-DD)</Text>
+            <View style={styles.row}>
+              <TextInput
+                style={[styles.input, { flex: 1 }]}
+                value={dateJumpInput}
+                onChangeText={t => {
+                  setDateJumpInput(t)
+                  setDateJumpError(null)
+                }}
+                placeholder={getTodayDate()}
+                autoCapitalize="none"
+              />
+              <MdButton title="Go" variant="filled" onPress={submitDateJump} />
+            </View>
+            {dateJumpError && <Text style={styles.errorTextInline}>{dateJumpError}</Text>}
+          </View>
+        )}
+
+        {!isViewingToday && (
+          <View style={styles.backfillBanner}>
+            <MaterialIcons name="history" size={16} color={colors.onSurfaceVariant} />
+            <Text style={styles.backfillBannerText}>
+              Viewing {viewedDateLabel}. Mark attendance below to backfill this day.
+            </Text>
+          </View>
+        )}
 
         {displayLectures.length === 0 && (
           <View style={styles.emptyCard}>
@@ -265,7 +369,36 @@ export default function TodayScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
   scroll: { padding: spacing(4) },
-  dateLabel: { ...typo.label, marginBottom: spacing(3), textTransform: "uppercase", letterSpacing: 0.5 },
+  dateNavRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: spacing(1)
+  },
+  dateNavArrow: { padding: spacing(2) },
+  dateNavLabelWrap: { alignItems: "center", flex: 1 },
+  dateLabel: { ...typo.label, textTransform: "uppercase", letterSpacing: 0.5 },
+  dateSubLabel: { ...typo.body, color: colors.onSurfaceVariant, marginTop: 2, fontSize: 12 },
+  backToTodayBtn: { alignSelf: "center", marginBottom: spacing(1) },
+  dateJumpCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    padding: spacing(3),
+    marginBottom: spacing(3),
+    ...elevation[1]
+  },
+  row: { flexDirection: "row", alignItems: "center", gap: spacing(2) },
+  errorTextInline: { fontSize: 12, color: colors.error, marginTop: spacing(1) },
+  backfillBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing(2),
+    backgroundColor: colors.neutralContainer,
+    borderRadius: radius.md,
+    padding: spacing(3),
+    marginBottom: spacing(3)
+  },
+  backfillBannerText: { flex: 1, fontSize: 12, color: colors.onSurfaceVariant, lineHeight: 16 },
   emptyCard: {
     backgroundColor: colors.surface,
     borderRadius: radius.lg,
