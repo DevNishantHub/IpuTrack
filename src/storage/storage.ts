@@ -9,10 +9,26 @@ const ATTENDANCE_KEY = "attendance"
 const BREAKS_KEY = "breaks"
 const TIMETABLE_IMPORTED_KEY = "timetableImported"
 const OVERRIDES_KEY = "dayOverrides"
+const ATTENDANCE_THRESHOLD_KEY = "attendanceThreshold"
+const LOW_ATTENDANCE_NOTIFIED_KEY = "lowAttendanceNotified"
+
+export const DEFAULT_ATTENDANCE_THRESHOLD = 75
+
+// Parses JSON from AsyncStorage defensively. If the stored value is
+// corrupted/malformed, this logs a warning and returns the fallback instead
+// of throwing, so a single bad key can't crash the whole app on load.
+function safeJsonParse<T>(raw: string, fallback: T): T {
+  try {
+    return JSON.parse(raw) as T
+  } catch (err) {
+    console.warn("storage: failed to parse stored JSON, using fallback", err)
+    return fallback
+  }
+}
 
 export const getLectures = async (): Promise<Lecture[]> => {
   const raw = await AsyncStorage.getItem(LECTURES_KEY)
-  if (raw) return JSON.parse(raw)
+  if (raw) return safeJsonParse<Lecture[]>(raw, seedLectures)
 
   // First run: no timetable saved yet, so pre-fill with the default schedule.
   await AsyncStorage.setItem(LECTURES_KEY, JSON.stringify(seedLectures))
@@ -47,13 +63,13 @@ export const setMasterTimetable = async (lectures: Lecture[]): Promise<void> => 
 
 export const getOverridesForDate = async (date: string): Promise<DayOverride[]> => {
   const raw = await AsyncStorage.getItem(OVERRIDES_KEY)
-  const all: DayOverride[] = raw ? JSON.parse(raw) : []
+  const all: DayOverride[] = raw ? safeJsonParse<DayOverride[]>(raw, []) : []
   return all.filter(o => o.date === date)
 }
 
 export const saveOverride = async (entry: DayOverride): Promise<void> => {
   const raw = await AsyncStorage.getItem(OVERRIDES_KEY)
-  const all: DayOverride[] = raw ? JSON.parse(raw) : []
+  const all: DayOverride[] = raw ? safeJsonParse<DayOverride[]>(raw, []) : []
   const updated = all.filter(
     o => !(o.lectureId === entry.lectureId && o.date === entry.date)
   )
@@ -63,7 +79,7 @@ export const saveOverride = async (entry: DayOverride): Promise<void> => {
 
 export const clearOverride = async (lectureId: string, date: string): Promise<void> => {
   const raw = await AsyncStorage.getItem(OVERRIDES_KEY)
-  const all: DayOverride[] = raw ? JSON.parse(raw) : []
+  const all: DayOverride[] = raw ? safeJsonParse<DayOverride[]>(raw, []) : []
   const updated = all.filter(o => !(o.lectureId === lectureId && o.date === date))
   await AsyncStorage.setItem(OVERRIDES_KEY, JSON.stringify(updated))
 }
@@ -72,7 +88,7 @@ export const clearOverride = async (lectureId: string, date: string): Promise<vo
 // beyond the single day they were meant for. Safe to call on every app load.
 export const pruneExpiredOverrides = async (todayDate: string): Promise<void> => {
   const raw = await AsyncStorage.getItem(OVERRIDES_KEY)
-  const all: DayOverride[] = raw ? JSON.parse(raw) : []
+  const all: DayOverride[] = raw ? safeJsonParse<DayOverride[]>(raw, []) : []
   const kept = all.filter(o => o.date >= todayDate)
   if (kept.length !== all.length) {
     await AsyncStorage.setItem(OVERRIDES_KEY, JSON.stringify(kept))
@@ -81,7 +97,7 @@ export const pruneExpiredOverrides = async (todayDate: string): Promise<void> =>
 
 export const getBreaks = async (): Promise<Break[]> => {
   const raw = await AsyncStorage.getItem(BREAKS_KEY)
-  if (raw) return JSON.parse(raw)
+  if (raw) return safeJsonParse<Break[]>(raw, seedBreaks)
 
   await AsyncStorage.setItem(BREAKS_KEY, JSON.stringify(seedBreaks))
   return seedBreaks
@@ -93,7 +109,7 @@ export const saveBreaks = async (breaks: Break[]): Promise<void> => {
 
 export const getAttendance = async (): Promise<Attendance[]> => {
   const raw = await AsyncStorage.getItem(ATTENDANCE_KEY)
-  return raw ? JSON.parse(raw) : []
+  return raw ? safeJsonParse<Attendance[]>(raw, []) : []
 }
 
 export const saveAttendance = async (entry: Attendance): Promise<void> => {
@@ -111,6 +127,38 @@ export const clearAllData = async (): Promise<void> => {
     ATTENDANCE_KEY,
     BREAKS_KEY,
     TIMETABLE_IMPORTED_KEY,
-    OVERRIDES_KEY
+    OVERRIDES_KEY,
+    ATTENDANCE_THRESHOLD_KEY,
+    LOW_ATTENDANCE_NOTIFIED_KEY
   ])
+}
+
+export const getAttendanceThreshold = async (): Promise<number> => {
+  const raw = await AsyncStorage.getItem(ATTENDANCE_THRESHOLD_KEY)
+  if (!raw) return DEFAULT_ATTENDANCE_THRESHOLD
+  const parsed = parseInt(raw, 10)
+  // Guard against a corrupted/non-numeric stored value silently disabling
+  // every low-attendance check (NaN comparisons are always false).
+  return Number.isNaN(parsed) ? DEFAULT_ATTENDANCE_THRESHOLD : parsed
+}
+
+export const setAttendanceThreshold = async (value: number): Promise<void> => {
+  await AsyncStorage.setItem(ATTENDANCE_THRESHOLD_KEY, value.toString())
+}
+
+export const wasLowAttendanceNotified = async (subject: string): Promise<boolean> => {
+  const raw = await AsyncStorage.getItem(LOW_ATTENDANCE_NOTIFIED_KEY)
+  const map: Record<string, boolean> = raw ? safeJsonParse<Record<string, boolean>>(raw, {}) : {}
+  return !!map[subject]
+}
+
+export const setLowAttendanceNotified = async (subject: string, notified: boolean): Promise<void> => {
+  const raw = await AsyncStorage.getItem(LOW_ATTENDANCE_NOTIFIED_KEY)
+  const map: Record<string, boolean> = raw ? safeJsonParse<Record<string, boolean>>(raw, {}) : {}
+  if (notified) {
+    map[subject] = true
+  } else {
+    delete map[subject]
+  }
+  await AsyncStorage.setItem(LOW_ATTENDANCE_NOTIFIED_KEY, JSON.stringify(map))
 }

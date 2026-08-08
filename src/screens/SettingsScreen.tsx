@@ -6,7 +6,7 @@ import * as Clipboard from "expo-clipboard"
 import { MaterialIcons } from "@expo/vector-icons"
 import MdButton from "../components/MdButton"
 import { colors, elevation, radius, type as typo, spacing } from "../theme"
-import { isTimetableImported, setMasterTimetable } from "../storage/storage"
+import { isTimetableImported, setMasterTimetable, getAttendanceThreshold, setAttendanceThreshold, DEFAULT_ATTENDANCE_THRESHOLD } from "../storage/storage"
 import { TIMETABLE_IMPORT_PROMPT, validateImportedTimetable } from "../utils/timetableImport"
 
 export default function SettingsScreen() {
@@ -14,9 +14,20 @@ export default function SettingsScreen() {
   const [showImportFlow, setShowImportFlow] = useState(false)
   const [pastedJson, setPastedJson] = useState("")
   const [error, setError] = useState<string | null>(null)
+  const [threshold, setThreshold] = useState(DEFAULT_ATTENDANCE_THRESHOLD)
+  const [thresholdInput, setThresholdInput] = useState("")
 
   useEffect(() => {
-    isTimetableImported().then(setImported)
+    isTimetableImported().then(setImported).catch(err => {
+      console.warn("Failed to load timetable import status:", err)
+    })
+    getAttendanceThreshold()
+      .then(t => { setThreshold(t); setThresholdInput(String(t)) })
+      .catch(err => {
+        console.warn("Failed to load attendance threshold, using default:", err)
+        setThreshold(DEFAULT_ATTENDANCE_THRESHOLD)
+        setThresholdInput(String(DEFAULT_ATTENDANCE_THRESHOLD))
+      })
   }, [])
 
   const copyPrompt = async () => {
@@ -50,6 +61,27 @@ export default function SettingsScreen() {
       )
     } else {
       proceed()
+    }
+  }
+
+  const saveThreshold = async () => {
+    // parseFloat (not parseInt) so a value like "75.5" is honored instead of
+    // silently truncated to 75 with no feedback to the user.
+    const value = parseFloat(thresholdInput)
+    if (isNaN(value) || value < 1 || value > 100) {
+      Alert.alert("Invalid threshold", "Please enter a number between 1 and 100.")
+      return
+    }
+    try {
+      // Awaited so the app doesn't show "Saved" (and the user doesn't close
+      // the app) before the write has actually landed in storage.
+      await setAttendanceThreshold(value)
+      setThreshold(value)
+      setThresholdInput(String(value))
+      Alert.alert("Saved", `Low attendance threshold set to ${value}%`)
+    } catch (err) {
+      console.warn("Failed to save attendance threshold:", err)
+      Alert.alert("Couldn't save", "Something went wrong saving your threshold. Please try again.")
     }
   }
 
@@ -137,6 +169,28 @@ export default function SettingsScreen() {
             </View>
           </>
         )}
+
+        <Text style={styles.sectionLabel}>NOTIFICATIONS</Text>
+
+        <View style={styles.card}>
+          <View style={styles.cardHeader}>
+            <MaterialIcons name="notifications-active" size={20} color={colors.onSurfaceVariant} />
+            <Text style={styles.cardTitle}>Low attendance alerts</Text>
+          </View>
+          <Text style={styles.cardBody}>
+            Get a push notification when a subject's attendance drops below your threshold.
+            Threshold applies per subject. Reset automatically when attendance recovers.
+          </Text>
+          <Text style={styles.label}>Threshold (%)</Text>
+          <TextInput
+            style={styles.input}
+            value={thresholdInput}
+            onChangeText={t => setThresholdInput(t)}
+            placeholder={`Default: ${DEFAULT_ATTENDANCE_THRESHOLD}`}
+            keyboardType="decimal-pad"
+          />
+          <MdButton title="Save threshold" variant="filled" onPress={saveThreshold} style={styles.actionBtn} />
+        </View>
       </ScrollView>
     </SafeAreaView>
   )
@@ -183,5 +237,13 @@ const styles = StyleSheet.create({
     marginTop: spacing(3)
   },
   errorText: { flex: 1, fontSize: 13, color: colors.error, lineHeight: 18 },
-  row: { flexDirection: "row", justifyContent: "flex-end", gap: spacing(2), marginTop: spacing(3) }
+  row: { flexDirection: "row", justifyContent: "flex-end", gap: spacing(2), marginTop: spacing(3) },
+  label: { ...typo.label, marginTop: spacing(3), marginBottom: spacing(1) },
+  input: {
+    borderWidth: 1,
+    borderColor: colors.outline,
+    padding: spacing(2.5),
+    borderRadius: radius.sm,
+    color: colors.onSurface
+  }
 })

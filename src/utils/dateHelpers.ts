@@ -6,5 +6,5 @@ export const toMinutes = (t: string) => {
   return h * 60 + (m || 0)
 }
 
-export const getToday = () => 1
+export const getToday = () => new Date().getDay()
 export const getTodayDate = () => new Date().toISOString().split("T")[0]

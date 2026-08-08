@@ -1,4 +1,5 @@
 // App.tsx
+import { useEffect } from "react"
 import { NavigationContainer, DefaultTheme } from "@react-navigation/native"
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs"
 import { MaterialIcons } from "@expo/vector-icons"
@@ -9,6 +10,7 @@ import TimetableScreen from "./src/screens/TimetableScreen"
 import StatsScreen from "./src/screens/StatsScreen"
 import SettingsScreen from "./src/screens/SettingsScreen"
 import { colors } from "./src/theme"
+import { ensureNotificationPermission } from "./src/utils/notifications"
 
 const Tab = createBottomTabNavigator()
 
@@ -31,6 +33,18 @@ const ICONS: Record<string, keyof typeof MaterialIcons.glyphMap> = {
 }
 
 export default function App() {
+  useEffect(() => {
+    ensureNotificationPermission()
+      .then(granted => {
+        if (!granted) {
+          console.warn("Notification permission not granted; low-attendance alerts will be disabled.")
+        }
+      })
+      .catch(err => {
+        console.warn("Failed to set up notification permissions:", err)
+      })
+  }, [])
+
   return (
     <NavigationContainer theme={navTheme}>
       <StatusBar style="dark" />

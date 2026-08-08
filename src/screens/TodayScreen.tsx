@@ -16,6 +16,7 @@ import { Lecture, Attendance, AttendanceStatus, DayOverride } from "../types"
 import { colors, elevation, radius, type as typo, spacing } from "../theme"
 import MdButton from "../components/MdButton"
 import { toMinutes, getToday, getTodayDate } from "../utils/dateHelpers"
+import { checkLowAttendanceAndNotify } from "../utils/attendance"
 import { CLASS_SUBJECTS, LAB_SUBJECTS } from "../data/subjects"
 
 const STATUS_META: Record<AttendanceStatus, { label: string; color: string; bg: string; icon: keyof typeof MaterialIcons.glyphMap }> = {
@@ -42,13 +43,13 @@ export default function TodayScreen() {
     load()
   }, [])
 
-  const load = async () => {
+  const load = async (preloaded?: { allLectures: Lecture[]; allAttendance: Attendance[] }) => {
     const todayDate = getTodayDate()
     await pruneExpiredOverrides(todayDate)
 
     const [allLectures, allAttendance, overrides] = await Promise.all([
-      getLectures(),
-      getAttendance(),
+      preloaded ? Promise.resolve(preloaded.allLectures) : getLectures(),
+      preloaded ? Promise.resolve(preloaded.allAttendance) : getAttendance(),
       getOverridesForDate(todayDate)
     ])
 
@@ -86,7 +87,20 @@ export default function TodayScreen() {
       date: getTodayDate(),
       status
     })
-    await load()
+
+    // Fetched once here and reused below for both the notify check and the
+    // reload, instead of hitting AsyncStorage twice per tap.
+    const [allLectures, allAttendance] = await Promise.all([getLectures(), getAttendance()])
+
+    // Check for low attendance notification (only for present/absent).
+    // Awaited (and run before load()) so the notified-flag write in
+    // AsyncStorage always finishes before the next mark() or reload can
+    // read/write it - avoids double-notify and missed-reset races.
+    if (status !== "cancelled") {
+      await checkLowAttendanceAndNotify(lectureId, allLectures, allAttendance)
+    }
+
+    await load({ allLectures, allAttendance })
   }
 
   const statusFor = (lectureId: string) =>

@@ -1,21 +1,41 @@
 {
   "expo": {
-    "name": "attendance-app",
+    "name": "IpuTrack",
     "slug": "attendance-app",
     "version": "1.0.0",
     "orientation": "portrait",
+    "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "assetBundlePatterns": [
       "**/*"
+    ],
+    "plugins": [
+      "expo-notifications",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#2563EB"
+        }
+      ]
     ],
     "ios": {
       "supportsTablet": true
     },
     "android": {
-      "package": "com.nishant.dbg.attendanceapp"
+      "package": "com.nishant.dbg.attendanceapp",
+      "permissions": [
+        "POST_NOTIFICATIONS"
+      ],
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#2563EB"
+      }
     },
     "web": {
-      "bundler": "metro"
+      "bundler": "metro",
+      "favicon": "./assets/favicon.png"
     },
     "extra": {
       "eas": {
