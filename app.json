@@ -1,0 +1,24 @@
+{
+  "expo": {
+    "name": "attendance-app",
+    "slug": "attendance-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {},
+    "web": {
+      "bundler": "metro"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "83a31da7-8d49-4497-aa5d-253a9980e27c"
+      }
+    }
+  }
+}
