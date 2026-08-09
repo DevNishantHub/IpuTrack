@@ -3,7 +3,7 @@ import { useCallback, useState } from "react"
 import { View, Text, StyleSheet, ScrollView, Alert } from "react-native"
 import { SafeAreaView } from "react-native-safe-area-context"
 import { useFocusEffect } from "@react-navigation/native"
-import { getAttendance, getLectures, clearAllData, getAttendanceThreshold, getSemesterStartDate, archiveCurrentSemester } from "../storage/storage"
+import { getAttendance, getLectures, clearAllData, getAttendanceThreshold, getEffectiveThresholds, getSemesterStartDate, archiveCurrentSemester } from "../storage/storage"
 import { calculateStats, calculateBunkInfo, getAttendanceTrend } from "../utils/attendance"
 import { Attendance, Lecture } from "../types"
 import { colors, elevation, radius, type as typo, spacing } from "../theme"
@@ -47,7 +47,12 @@ export default function StatsScreen() {
   )
 
   const load = async () => {
-    const [attendance, lectures, globalThreshold, semStart]: [Attendance[], Lecture[], number, string | null] = await Promise.all([
+    const [attendance, lectures, globalThreshold, semStart]: [
+      Attendance[],
+      Lecture[],
+      number,
+      string | null
+    ] = await Promise.all([
       getAttendance(),
       getLectures(),
       getAttendanceThreshold(),
@@ -63,12 +68,14 @@ export default function StatsScreen() {
     setOverall(calculateStats(currentAttendance))
 
     const subjects = Array.from(new Set(lectures.map(l => l.subject))).sort()
+    const effectiveThresholds = await getEffectiveThresholds(subjects)
     const perSubject = subjects.map(subject => {
       const lectureIds = lectures.filter(l => l.subject === subject).map(l => l.id)
       const subjectAttendance = currentAttendance.filter(a => lectureIds.includes(a.lectureId))
       const stats = calculateStats(subjectAttendance)
-      const bunk = calculateBunkInfo(currentAttendance, lectures, subject, globalThreshold)
-      return { subject, ...stats, ...bunk, threshold: globalThreshold }
+      const effectiveThreshold = effectiveThresholds[subject]
+      const bunk = calculateBunkInfo(currentAttendance, lectures, subject, effectiveThreshold)
+      return { subject, ...stats, ...bunk, threshold: effectiveThreshold }
     })
     setBySubject(perSubject)
   }
@@ -197,15 +204,6 @@ export default function StatsScreen() {
               />
             </View>
 
-            {selectedTrendSubject === s.subject && trendData.length > 0 && (
-              <View style={styles.trendWrapper}>
-                <AttendanceChart
-                  subject={s.subject}
-                  threshold={s.threshold}
-                  data={trendData}
-                />
-              </View>
-            )}
           </View>
         ))}
 
@@ -213,7 +211,7 @@ export default function StatsScreen() {
           <View style={styles.trendCard}>
             <AttendanceChart
               subject={selectedTrendSubject}
-              threshold={bySubject.find(s => s.subject === selectedTrendSubject)?.threshold ?? 75}
+              threshold={bySubject.find(s => s.subject === selectedTrendSubject)?.threshold ?? threshold}
               data={trendData}
             />
           </View>
@@ -265,6 +263,17 @@ const styles = StyleSheet.create({
   heroSubMuted: { fontSize: 12, color: colors.onSurfaceVariant, marginTop: 2 },
   sectionLabel: { ...typo.label, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: spacing(2) },
   empty: { ...typo.body, color: colors.onSurfaceVariant },
+  semesterCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    padding: spacing(3),
+    marginBottom: spacing(5),
+    ...elevation[1]
+  },
+  semesterRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  semesterLabel: { fontSize: 11, color: colors.onSurfaceVariant },
+  semesterDate: { ...typo.title, fontSize: 14, marginTop: 2 },
+  semesterBtn: { alignSelf: "center" },
   subjectCard: {
     backgroundColor: colors.surface,
     borderRadius: radius.md,
@@ -277,6 +286,26 @@ const styles = StyleSheet.create({
   subjectPct: { fontSize: 14, fontWeight: "700" },
   track: { height: 6, borderRadius: 3, backgroundColor: colors.neutralContainer, overflow: "hidden" },
   fill: { height: "100%", borderRadius: 3 },
+  bunkRow: { flexDirection: "row", alignItems: "center", marginTop: spacing(3), gap: spacing(4) },
+  bunkItem: { flexDirection: "column" },
+  bunkLabel: { fontSize: 11, color: colors.onSurfaceVariant },
+  bunkValue: { fontSize: 13, fontWeight: "700" },
+  bunkNeutral: { fontSize: 12, color: colors.onSurfaceVariant },
+  thresholdRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginTop: spacing(3)
+  },
+  thresholdLabel: { fontSize: 12, color: colors.onSurfaceVariant },
+  trendBtn: { paddingHorizontal: 0 },
+  trendCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    padding: spacing(3),
+    marginBottom: spacing(2),
+    ...elevation[1]
+  },
   resetWrap: { marginTop: spacing(6), alignItems: "flex-start" },
   confirmCard: {
     backgroundColor: colors.errorContainer,
