@@ -10,9 +10,11 @@ import {
   getOverridesForDate,
   saveOverride,
   clearOverride,
-  pruneExpiredOverrides
+  pruneExpiredOverrides,
+  getHolidayForDate,
+  removeHoliday
 } from "../storage/storage"
-import { Lecture, Attendance, AttendanceStatus, DayOverride } from "../types"
+import { Lecture, Attendance, AttendanceStatus, DayOverride, Holiday } from "../types"
 import { colors, elevation, radius, type as typo, spacing } from "../theme"
 import MdButton from "../components/MdButton"
 import {
@@ -48,6 +50,7 @@ export default function TodayScreen() {
 
   const [displayLectures, setDisplayLectures] = useState<DisplayLecture[]>([])
   const [dayAttendance, setDayAttendance] = useState<Attendance[]>([])
+  const [holiday, setHoliday] = useState<Holiday | null>(null)
   const [editing, setEditing] = useState<DisplayLecture | null>(null)
   const [editSubject, setEditSubject] = useState("")
   const [editTime, setEditTime] = useState("")
@@ -66,11 +69,14 @@ export default function TodayScreen() {
     // pruning is still anchored to the real today, not the viewed date.
     await pruneExpiredOverrides(todayDate)
 
-    const [allLectures, allAttendance, overrides] = await Promise.all([
+    const [allLectures, allAttendance, overrides, holidayForDate] = await Promise.all([
       preloaded ? Promise.resolve(preloaded.allLectures) : getLectures(),
       preloaded ? Promise.resolve(preloaded.allAttendance) : getAttendance(),
-      getOverridesForDate(selectedDate)
+      getOverridesForDate(selectedDate),
+      getHolidayForDate(selectedDate)
     ])
+
+    setHoliday(holidayForDate)
 
     const overrideFor = (id: string) => overrides.find(o => o.lectureId === id)
 
@@ -189,6 +195,11 @@ export default function TodayScreen() {
     await load()
   }
 
+  const undoHoliday = async () => {
+    await removeHoliday(selectedDate)
+    await load()
+  }
+
   const viewedDateLabel = new Date(`${selectedDate}T00:00:00`).toLocaleDateString(undefined, {
     weekday: "long",
     month: "short",
@@ -263,14 +274,31 @@ export default function TodayScreen() {
           </View>
         )}
 
-        {displayLectures.length === 0 && (
+        {holiday && (
+          <View style={styles.holidayCard}>
+            <MaterialIcons name="celebration" size={32} color={colors.primary} />
+            <Text style={styles.holidayTitle}>{holiday.label || "College Holiday"}</Text>
+            <Text style={styles.holidayBody}>
+              No classes marked as scheduled for this date. Attendance marking is hidden while
+              this date is set as a holiday.
+            </Text>
+            <MdButton
+              title="Not a holiday - undo"
+              variant="text"
+              onPress={undoHoliday}
+              style={styles.actionBtn}
+            />
+          </View>
+        )}
+
+        {!holiday && displayLectures.length === 0 && (
           <View style={styles.emptyCard}>
             <MaterialIcons name="event-available" size={32} color={colors.onSurfaceVariant} />
             <Text style={styles.empty}>No lectures scheduled for today.</Text>
           </View>
         )}
 
-        {displayLectures.map(l => {
+        {!holiday && displayLectures.map(l => {
           const current = statusFor(l.id)
           const meta = current ? STATUS_META[current] : null
           return (
@@ -410,6 +438,17 @@ const styles = StyleSheet.create({
     gap: spacing(2)
   },
   empty: { ...typo.body, color: colors.onSurfaceVariant, textAlign: "center" },
+  holidayCard: {
+    backgroundColor: colors.primaryContainer,
+    borderRadius: radius.lg,
+    padding: spacing(8),
+    alignItems: "center",
+    gap: spacing(2),
+    marginBottom: spacing(3)
+  },
+  holidayTitle: { ...typo.title, textAlign: "center" },
+  holidayBody: { ...typo.body, color: colors.onSurfaceVariant, textAlign: "center" },
+  actionBtn: { marginTop: spacing(2) },
   card: {
     backgroundColor: colors.surface,
     borderRadius: radius.lg,

@@ -1,6 +1,6 @@
 // src/screens/SettingsScreen.tsx
 import { useEffect, useState } from "react"
-import { View, Text, TextInput, StyleSheet, ScrollView, Alert } from "react-native"
+import { View, Text, TextInput, StyleSheet, ScrollView, Alert, Switch } from "react-native"
 import { SafeAreaView } from "react-native-safe-area-context"
 import * as Clipboard from "expo-clipboard"
 import { MaterialIcons } from "@expo/vector-icons"
@@ -17,11 +17,19 @@ import {
   saveAttendanceBulk,
   getSemesterStartDate,
   setSemesterStartDate,
-  archiveCurrentSemester
+  archiveCurrentSemester,
+  getHolidays,
+  addHoliday,
+  removeHoliday,
+  getReminderSettings,
+  setReminderSettings,
+  DEFAULT_REMINDER_MINUTES_BEFORE
 } from "../storage/storage"
+import { Holiday } from "../types"
 import { TIMETABLE_IMPORT_PROMPT, validateImportedTimetable } from "../utils/timetableImport"
 import { attendanceToCsv, parseAttendanceCsv } from "../utils/csv"
 import { getTodayDate, isValidDateString } from "../utils/dateHelpers"
+import { ensureNotificationPermission, scheduleClassReminders, cancelAllClassReminders } from "../utils/notifications"
 
 export default function SettingsScreen() {
   const [imported, setImported] = useState(false)
@@ -40,6 +48,16 @@ export default function SettingsScreen() {
   const [exporting, setExporting] = useState(false)
   const [importing, setImporting] = useState(false)
   const [archiving, setArchiving] = useState(false)
+
+  const [holidays, setHolidays] = useState<Holiday[]>([])
+  const [holidayDateInput, setHolidayDateInput] = useState("")
+  const [holidayLabelInput, setHolidayLabelInput] = useState("")
+  const [addingHoliday, setAddingHoliday] = useState(false)
+
+  const [remindersEnabled, setRemindersEnabled] = useState(false)
+  const [reminderMinutesInput, setReminderMinutesInput] = useState(String(DEFAULT_REMINDER_MINUTES_BEFORE))
+  const [savingReminderMinutes, setSavingReminderMinutes] = useState(false)
+  const [reminderToggleBusy, setReminderToggleBusy] = useState(false)
 
   useEffect(() => {
     isTimetableImported().then(setImported).catch(err => {
@@ -60,6 +78,17 @@ export default function SettingsScreen() {
     }).catch(err => {
       console.warn("Failed to load semester start date:", err)
     })
+    getHolidays().then(setHolidays).catch(err => {
+      console.warn("Failed to load holidays:", err)
+    })
+    getReminderSettings()
+      .then(s => {
+        setRemindersEnabled(s.enabled)
+        setReminderMinutesInput(String(s.minutesBefore))
+      })
+      .catch(err => {
+        console.warn("Failed to load reminder settings:", err)
+      })
   }, [])
 
   const copyPrompt = async () => {
@@ -80,6 +109,17 @@ export default function SettingsScreen() {
       setPastedJson("")
       setError(null)
       Alert.alert("Timetable saved", "Your timetable is now set as your permanent schedule.")
+
+      // Reminders are scheduled against specific lecture ids/times, so a
+      // full timetable replace must re-sync them - otherwise old reminders
+      // for lectures that no longer exist (or now have different times)
+      // would keep firing.
+      if (remindersEnabled) {
+        const minutes = parseInt(reminderMinutesInput, 10) || DEFAULT_REMINDER_MINUTES_BEFORE
+        scheduleClassReminders(result.lectures, minutes).catch(err => {
+          console.warn("Failed to re-sync class reminders after timetable import:", err)
+        })
+      }
     }
 
     if (imported) {
@@ -193,6 +233,123 @@ export default function SettingsScreen() {
     }
   }
 
+  const handleAddHoliday = async () => {
+    const date = holidayDateInput.trim()
+    if (!isValidDateString(date)) {
+      Alert.alert("Invalid date", "Please enter a valid date in YYYY-MM-DD format.")
+      return
+    }
+
+    const proceed = async () => {
+      setAddingHoliday(true)
+      try {
+        await addHoliday(date, holidayLabelInput)
+        const updated = await getHolidays()
+        setHolidays(updated)
+        setHolidayDateInput("")
+        setHolidayLabelInput("")
+      } catch (err) {
+        console.warn("Failed to add holiday:", err)
+        Alert.alert("Couldn't save", "Something went wrong adding this holiday. Please try again.")
+      } finally {
+        setAddingHoliday(false)
+      }
+    }
+
+    // Marking a date a holiday never deletes existing attendance for that
+    // date - but if there IS existing attendance, the user should know
+    // it'll simply be hidden from Today's marking view while the holiday
+    // flag is on, not touched.
+    try {
+      const attendance = await getAttendance()
+      const hasExisting = attendance.some(a => a.date === date)
+      if (hasExisting) {
+        Alert.alert(
+          "Attendance already marked",
+          `You already have attendance recorded on ${date}. Marking it a holiday won't delete that data - it'll just be hidden from the Today screen while this date is set as a holiday.`,
+          [
+            { text: "Cancel", style: "cancel" },
+            { text: "Mark as holiday", onPress: proceed }
+          ]
+        )
+        return
+      }
+    } catch (err) {
+      console.warn("Failed to check existing attendance before adding holiday:", err)
+      // Fall through and let the user add it anyway rather than blocking
+      // the whole feature on this best-effort check failing.
+    }
+
+    await proceed()
+  }
+
+  const handleRemoveHoliday = async (date: string) => {
+    try {
+      await removeHoliday(date)
+      const updated = await getHolidays()
+      setHolidays(updated)
+    } catch (err) {
+      console.warn("Failed to remove holiday:", err)
+      Alert.alert("Couldn't remove", "Something went wrong removing this holiday. Please try again.")
+    }
+  }
+
+  const handleToggleReminders = async (value: boolean) => {
+    setReminderToggleBusy(true)
+    try {
+      if (value) {
+        const granted = await ensureNotificationPermission()
+        if (!granted) {
+          Alert.alert(
+            "Notifications disabled",
+            "Class reminders need notification permission. Enable it for this app in your device settings, then try again."
+          )
+          return
+        }
+        const minutes = parseInt(reminderMinutesInput, 10)
+        const validMinutes = Number.isFinite(minutes) && minutes >= 1 && minutes <= 180
+          ? minutes
+          : DEFAULT_REMINDER_MINUTES_BEFORE
+        await setReminderSettings({ enabled: true, minutesBefore: validMinutes })
+        setReminderMinutesInput(String(validMinutes))
+        const lectures = await getLectures()
+        await scheduleClassReminders(lectures, validMinutes)
+      } else {
+        await setReminderSettings({ enabled: false, minutesBefore: parseInt(reminderMinutesInput, 10) || DEFAULT_REMINDER_MINUTES_BEFORE })
+        await cancelAllClassReminders()
+      }
+      setRemindersEnabled(value)
+    } catch (err) {
+      console.warn("Failed to update class reminder setting:", err)
+      Alert.alert("Couldn't save", "Something went wrong updating class reminders. Please try again.")
+    } finally {
+      setReminderToggleBusy(false)
+    }
+  }
+
+  const handleSaveReminderMinutes = async () => {
+    const minutes = parseInt(reminderMinutesInput, 10)
+    if (!Number.isFinite(minutes) || minutes < 1 || minutes > 180) {
+      Alert.alert("Invalid value", "Please enter a number of minutes between 1 and 180.")
+      return
+    }
+    setSavingReminderMinutes(true)
+    try {
+      await setReminderSettings({ enabled: remindersEnabled, minutesBefore: minutes })
+      setReminderMinutesInput(String(minutes))
+      if (remindersEnabled) {
+        const lectures = await getLectures()
+        await scheduleClassReminders(lectures, minutes)
+      }
+      Alert.alert("Saved", `You'll be reminded ${minutes} minute(s) before each class.`)
+    } catch (err) {
+      console.warn("Failed to save reminder minutes:", err)
+      Alert.alert("Couldn't save", "Something went wrong saving this. Please try again.")
+    } finally {
+      setSavingReminderMinutes(false)
+    }
+  }
+
   return (
     <SafeAreaView style={styles.container} edges={["left", "right"]}>
       <ScrollView contentContainerStyle={styles.scroll}>
@@ -298,6 +455,103 @@ export default function SettingsScreen() {
             keyboardType="decimal-pad"
           />
           <MdButton title="Save threshold" variant="filled" onPress={saveThreshold} style={styles.actionBtn} />
+        </View>
+
+        <View style={styles.card}>
+          <View style={styles.cardHeader}>
+            <MaterialIcons name="alarm" size={20} color={colors.onSurfaceVariant} />
+            <Text style={styles.cardTitle}>Class reminders</Text>
+          </View>
+          <Text style={styles.cardBody}>
+            Get a push notification before each class starts, based on your permanent
+            timetable. One-off "edit for today" changes on the Today tab don't shift or skip
+            that day's reminder.
+          </Text>
+          <View style={styles.switchRow}>
+            <Text style={styles.body}>Remind me before each class</Text>
+            <Switch
+              value={remindersEnabled}
+              onValueChange={handleToggleReminders}
+              disabled={reminderToggleBusy}
+              trackColor={{ true: colors.primary }}
+            />
+          </View>
+          {remindersEnabled && (
+            <>
+              <Text style={styles.label}>Minutes before</Text>
+              <View style={styles.row}>
+                <TextInput
+                  style={[styles.input, { flex: 1 }]}
+                  value={reminderMinutesInput}
+                  onChangeText={setReminderMinutesInput}
+                  placeholder={String(DEFAULT_REMINDER_MINUTES_BEFORE)}
+                  keyboardType="number-pad"
+                />
+                <MdButton
+                  title={savingReminderMinutes ? "Saving..." : "Save"}
+                  variant="tonal"
+                  onPress={handleSaveReminderMinutes}
+                  disabled={savingReminderMinutes}
+                />
+              </View>
+            </>
+          )}
+        </View>
+
+        <Text style={styles.sectionLabel}>HOLIDAYS</Text>
+
+        <View style={styles.card}>
+          <View style={styles.cardHeader}>
+            <MaterialIcons name="beach-access" size={20} color={colors.onSurfaceVariant} />
+            <Text style={styles.cardTitle}>College holidays &amp; no-class days</Text>
+          </View>
+          <Text style={styles.cardBody}>
+            Mark a date as a holiday to hide it from attendance marking on the Today tab.
+            This never edits or deletes any attendance you've already recorded - it's kept
+            completely separate from your attendance history.
+          </Text>
+
+          <Text style={styles.label}>Date (YYYY-MM-DD)</Text>
+          <TextInput
+            style={styles.input}
+            value={holidayDateInput}
+            onChangeText={setHolidayDateInput}
+            placeholder={getTodayDate()}
+            keyboardType="numbers-and-punctuation"
+            autoCapitalize="none"
+          />
+          <Text style={styles.label}>Label (optional)</Text>
+          <TextInput
+            style={styles.input}
+            value={holidayLabelInput}
+            onChangeText={setHolidayLabelInput}
+            placeholder="e.g. Diwali, Mid-sem break"
+          />
+          <MdButton
+            title={addingHoliday ? "Adding..." : "Add holiday"}
+            variant="filled"
+            onPress={handleAddHoliday}
+            disabled={addingHoliday}
+            style={styles.actionBtn}
+          />
+
+          {holidays.length > 0 && (
+            <View style={styles.holidayList}>
+              {holidays.map(h => (
+                <View key={h.date} style={styles.holidayRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.holidayRowDate}>{h.date}</Text>
+                    {h.label && <Text style={styles.holidayRowLabel}>{h.label}</Text>}
+                  </View>
+                  <MdButton
+                    title="Remove"
+                    variant="text"
+                    onPress={() => handleRemoveHoliday(h.date)}
+                  />
+                </View>
+              ))}
+            </View>
+          )}
         </View>
 
         <Text style={styles.sectionLabel}>SEMESTER</Text>
@@ -489,5 +743,23 @@ const styles = StyleSheet.create({
     marginTop: spacing(3),
     alignItems: "center",
     flexWrap: "wrap"
-  }
+  },
+  body: { ...typo.body },
+  switchRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginTop: spacing(3)
+  },
+  holidayList: { marginTop: spacing(4), gap: spacing(1) },
+  holidayRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingVertical: spacing(2),
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.divider
+  },
+  holidayRowDate: { ...typo.body, fontWeight: "600" },
+  holidayRowLabel: { fontSize: 12, color: colors.onSurfaceVariant, marginTop: 2 }
 })

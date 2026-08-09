@@ -13,7 +13,8 @@ import TimetableScreen from "./screens/TimetableScreen"
 import StatsScreen from "./screens/StatsScreen"
 import SettingsScreen from "./screens/SettingsScreen"
 import { colors, spacing } from "./theme"
-import { ensureNotificationPermission } from "./utils/notifications"
+import { ensureNotificationPermission, scheduleClassReminders } from "./utils/notifications"
+import { getReminderSettings, getLectures } from "./storage/storage"
 
 const Tab = createMaterialTopTabNavigator()
 
@@ -81,9 +82,25 @@ function BottomStyleTabBar({ state, descriptors, navigation }: MaterialTopTabBar
 export default function App() {
   useEffect(() => {
     ensureNotificationPermission()
-      .then(granted => {
+      .then(async granted => {
         if (!granted) {
           console.warn("Notification permission not granted; low-attendance alerts will be disabled.")
+          return
+        }
+
+        // Re-sync class reminders on every cold start. This is cheap
+        // (local scheduling only) and guards against the OS clearing
+        // pending notifications, or the timetable having changed while
+        // the app was closed - without this, reminders could silently
+        // drift out of sync with the actual schedule.
+        try {
+          const settings = await getReminderSettings()
+          if (settings.enabled) {
+            const lectures = await getLectures()
+            await scheduleClassReminders(lectures, settings.minutesBefore)
+          }
+        } catch (err) {
+          console.warn("Failed to re-sync class reminders on startup:", err)
         }
       })
       .catch(err => {
