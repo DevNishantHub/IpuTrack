@@ -32,3 +32,11 @@ export type Attendance = {
   date: string
   status: AttendanceStatus
 }
+
+export type ArchivedSemester = {
+  id: string
+  startDate: string
+  endDate: string
+  attendance: Attendance[]
+  lectures: Lecture[]
+}

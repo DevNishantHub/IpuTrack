@@ -1,8 +1,9 @@
 // src/storage/storage.ts
 import AsyncStorage from "@react-native-async-storage/async-storage"
-import { Attendance, Lecture, Break, DayOverride } from "../types"
+import { Attendance, Lecture, Break, DayOverride, ArchivedSemester } from "../types"
 import { seedLectures } from "../data/seedLectures"
 import { seedBreaks } from "../data/seedBreaks"
+import { getTodayDate } from "../utils/dateHelpers"
 
 const LECTURES_KEY = "lectures"
 const ATTENDANCE_KEY = "attendance"
@@ -11,6 +12,8 @@ const TIMETABLE_IMPORTED_KEY = "timetableImported"
 const OVERRIDES_KEY = "dayOverrides"
 const ATTENDANCE_THRESHOLD_KEY = "attendanceThreshold"
 const LOW_ATTENDANCE_NOTIFIED_KEY = "lowAttendanceNotified"
+const SEMESTER_START_DATE_KEY = "semesterStartDate"
+const ARCHIVED_SEMESTERS_KEY = "archivedSemesters"
 
 export const DEFAULT_ATTENDANCE_THRESHOLD = 75
 
@@ -175,4 +178,50 @@ export const setLowAttendanceNotified = async (subject: string, notified: boolea
     delete map[subject]
   }
   await AsyncStorage.setItem(LOW_ATTENDANCE_NOTIFIED_KEY, JSON.stringify(map))
+}
+
+export const getEffectiveThreshold = async (subject: string): Promise<number> => {
+  return getAttendanceThreshold()
+}
+
+// --- Semester management ---
+export const getSemesterStartDate = async (): Promise<string | null> => {
+  const raw = await AsyncStorage.getItem(SEMESTER_START_DATE_KEY)
+  return raw ?? null
+}
+
+export const setSemesterStartDate = async (date: string): Promise<void> => {
+  await AsyncStorage.setItem(SEMESTER_START_DATE_KEY, date)
+}
+
+export const getArchivedSemesters = async (): Promise<ArchivedSemester[]> => {
+  const raw = await AsyncStorage.getItem(ARCHIVED_SEMESTERS_KEY)
+  return raw ? safeJsonParse<ArchivedSemester[]>(raw, []) : []
+}
+
+export const archiveCurrentSemester = async (): Promise<void> => {
+  const [attendance, lectures, semesterStart] = await Promise.all([
+    getAttendance(),
+    getLectures(),
+    getSemesterStartDate()
+  ])
+
+  const endDate = getTodayDate()
+  const startDate = semesterStart ?? endDate
+
+  if (attendance.length > 0) {
+    const archived: ArchivedSemester = {
+      id: `sem-${Date.now()}`,
+      startDate,
+      endDate,
+      attendance,
+      lectures
+    }
+    const existing = await getArchivedSemesters()
+    await AsyncStorage.setItem(ARCHIVED_SEMESTERS_KEY, JSON.stringify([...existing, archived]))
+  }
+
+  // Clear current attendance, keep lectures, set new semester start
+  await AsyncStorage.setItem(ATTENDANCE_KEY, JSON.stringify([]))
+  await setSemesterStartDate(getTodayDate())
 }

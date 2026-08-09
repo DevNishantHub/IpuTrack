@@ -14,10 +14,14 @@ import {
   DEFAULT_ATTENDANCE_THRESHOLD,
   getAttendance,
   getLectures,
-  saveAttendanceBulk
+  saveAttendanceBulk,
+  getSemesterStartDate,
+  setSemesterStartDate,
+  archiveCurrentSemester
 } from "../storage/storage"
 import { TIMETABLE_IMPORT_PROMPT, validateImportedTimetable } from "../utils/timetableImport"
 import { attendanceToCsv, parseAttendanceCsv } from "../utils/csv"
+import { getTodayDate } from "../utils/dateHelpers"
 
 export default function SettingsScreen() {
   const [imported, setImported] = useState(false)
@@ -27,11 +31,15 @@ export default function SettingsScreen() {
   const [threshold, setThreshold] = useState(DEFAULT_ATTENDANCE_THRESHOLD)
   const [thresholdInput, setThresholdInput] = useState("")
 
+  const [semesterStartDate, setSemesterStartDate] = useState<string>("")
+  const [semesterDateInput, setSemesterDateInput] = useState("")
+
   const [showCsvImport, setShowCsvImport] = useState(false)
   const [csvInput, setCsvInput] = useState("")
   const [csvError, setCsvError] = useState<string | null>(null)
   const [exporting, setExporting] = useState(false)
   const [importing, setImporting] = useState(false)
+  const [archiving, setArchiving] = useState(false)
 
   useEffect(() => {
     isTimetableImported().then(setImported).catch(err => {
@@ -44,6 +52,14 @@ export default function SettingsScreen() {
         setThreshold(DEFAULT_ATTENDANCE_THRESHOLD)
         setThresholdInput(String(DEFAULT_ATTENDANCE_THRESHOLD))
       })
+    getSemesterStartDate().then(date => {
+      if (date) {
+        setSemesterStartDate(date)
+        setSemesterDateInput(date)
+      }
+    }).catch(err => {
+      console.warn("Failed to load semester start date:", err)
+    })
   }, [])
 
   const copyPrompt = async () => {
@@ -98,6 +114,34 @@ export default function SettingsScreen() {
     } catch (err) {
       console.warn("Failed to save attendance threshold:", err)
       Alert.alert("Couldn't save", "Something went wrong saving your threshold. Please try again.")
+    }
+  }
+
+  const handleArchiveSemester = async () => {
+    setArchiving(true)
+    try {
+      await archiveCurrentSemester()
+      const today = getTodayDate()
+      setSemesterStartDate(today)
+      setSemesterDateInput(today)
+      Alert.alert("Semester Archived", "Current attendance archived. New semester started today.")
+    } catch (err) {
+      console.warn("Failed to archive semester:", err)
+      Alert.alert("Couldn't archive", "Something went wrong. Please try again.")
+    } finally {
+      setArchiving(false)
+    }
+  }
+
+  const handleSemesterDateChange = async () => {
+    if (!semesterDateInput) return
+    try {
+      await setSemesterStartDate(semesterDateInput)
+      setSemesterStartDate(semesterDateInput)
+      Alert.alert("Saved", `Semester start date set to ${semesterDateInput}`)
+    } catch (err) {
+      console.warn("Failed to save semester start date:", err)
+      Alert.alert("Couldn't save", "Something went wrong. Please try again.")
     }
   }
 
@@ -238,8 +282,8 @@ export default function SettingsScreen() {
             <Text style={styles.cardTitle}>Low attendance alerts</Text>
           </View>
           <Text style={styles.cardBody}>
-            Get a push notification when a subject's attendance drops below your threshold.
-            Threshold applies per subject. Reset automatically when attendance recovers.
+            Get a push notification when a subject's attendance drops below this threshold.
+            Applies to every subject. Reset automatically when attendance recovers.
           </Text>
           <Text style={styles.label}>Threshold (%)</Text>
           <TextInput
@@ -250,6 +294,44 @@ export default function SettingsScreen() {
             keyboardType="decimal-pad"
           />
           <MdButton title="Save threshold" variant="filled" onPress={saveThreshold} style={styles.actionBtn} />
+        </View>
+
+        <Text style={styles.sectionLabel}>SEMESTER</Text>
+
+        <View style={styles.card}>
+          <View style={styles.cardHeader}>
+            <MaterialIcons name="calendar-today" size={20} color={colors.onSurfaceVariant} />
+            <Text style={styles.cardTitle}>Semester management</Text>
+          </View>
+          <Text style={styles.cardBody}>
+            Archive current attendance and start a fresh semester. Your timetable is preserved.
+          </Text>
+          <View style={styles.semesterRow}>
+            <Text style={styles.semesterLabel}>Current semester started:</Text>
+            <Text style={styles.semesterDate}>{semesterStartDate || "Not set"}</Text>
+          </View>
+          <View style={styles.semesterInputRow}>
+            <TextInput
+              style={styles.input}
+              value={semesterDateInput}
+              onChangeText={t => setSemesterDateInput(t)}
+              placeholder={getTodayDate()}
+              keyboardType="datetime-pad"
+            />
+            <MdButton
+              title="Set date"
+              variant="tonal"
+              onPress={handleSemesterDateChange}
+              style={styles.actionBtn}
+            />
+          </View>
+          <MdButton
+            title={archiving ? "Archiving..." : "Archive & Start New Semester"}
+            variant="outlined"
+            onPress={handleArchiveSemester}
+            disabled={archiving}
+            style={styles.actionBtn}
+          />
         </View>
 
         <Text style={styles.sectionLabel}>DATA</Text>
@@ -386,5 +468,21 @@ const styles = StyleSheet.create({
     padding: spacing(2.5),
     borderRadius: radius.sm,
     color: colors.onSurface
+  },
+  semesterRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginTop: spacing(3),
+    paddingVertical: spacing(2)
+  },
+  semesterLabel: { ...typo.body },
+  semesterDate: { ...typo.body, fontWeight: "600", color: colors.primary },
+  semesterInputRow: {
+    flexDirection: "row",
+    gap: spacing(2),
+    marginTop: spacing(3),
+    alignItems: "center",
+    flexWrap: "wrap"
   }
 })

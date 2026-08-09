@@ -1,13 +1,15 @@
 // src/screens/StatsScreen.tsx
 import { useCallback, useState } from "react"
-import { View, Text, StyleSheet, ScrollView } from "react-native"
+import { View, Text, StyleSheet, ScrollView, Alert } from "react-native"
 import { SafeAreaView } from "react-native-safe-area-context"
 import { useFocusEffect } from "@react-navigation/native"
-import { getAttendance, getLectures, clearAllData } from "../storage/storage"
-import { calculateStats } from "../utils/attendance"
+import { getAttendance, getLectures, clearAllData, getAttendanceThreshold, getSemesterStartDate, archiveCurrentSemester } from "../storage/storage"
+import { calculateStats, calculateBunkInfo, getAttendanceTrend } from "../utils/attendance"
 import { Attendance, Lecture } from "../types"
 import { colors, elevation, radius, type as typo, spacing } from "../theme"
 import MdButton from "../components/MdButton"
+import AttendanceChart from "../components/AttendanceChart"
+import { getTodayDate } from "../utils/dateHelpers"
 
 type SubjectStats = {
   subject: string
@@ -15,6 +17,9 @@ type SubjectStats = {
   absent: number
   cancelled: number
   percentage: number
+  canSkip: number
+  mustAttend: number
+  threshold: number
 }
 
 const barColor = (pct: number) =>
@@ -29,6 +34,11 @@ export default function StatsScreen() {
   })
   const [bySubject, setBySubject] = useState<SubjectStats[]>([])
   const [confirmingReset, setConfirmingReset] = useState(false)
+  const [threshold, setThreshold] = useState(75)
+  const [semesterStartDate, setSemesterStartDate] = useState<string>("")
+  const [selectedTrendSubject, setSelectedTrendSubject] = useState<string | null>(null)
+  const [trendData, setTrendData] = useState<{ date: string; percentage: number }[]>([])
+  const [confirmingArchive, setConfirmingArchive] = useState(false)
 
   useFocusEffect(
     useCallback(() => {
@@ -37,19 +47,28 @@ export default function StatsScreen() {
   )
 
   const load = async () => {
-    const [attendance, lectures]: [Attendance[], Lecture[]] = await Promise.all([
+    const [attendance, lectures, globalThreshold, semStart]: [Attendance[], Lecture[], number, string | null] = await Promise.all([
       getAttendance(),
-      getLectures()
+      getLectures(),
+      getAttendanceThreshold(),
+      getSemesterStartDate()
     ])
 
-    setOverall(calculateStats(attendance))
+    setThreshold(globalThreshold)
+    setSemesterStartDate(semStart ?? getTodayDate())
+
+    // Filter attendance by semester start date for current stats
+    const currentAttendance = attendance.filter(a => a.date >= (semStart ?? getTodayDate()))
+
+    setOverall(calculateStats(currentAttendance))
 
     const subjects = Array.from(new Set(lectures.map(l => l.subject))).sort()
     const perSubject = subjects.map(subject => {
       const lectureIds = lectures.filter(l => l.subject === subject).map(l => l.id)
-      const subjectAttendance = attendance.filter(a => lectureIds.includes(a.lectureId))
+      const subjectAttendance = currentAttendance.filter(a => lectureIds.includes(a.lectureId))
       const stats = calculateStats(subjectAttendance)
-      return { subject, ...stats }
+      const bunk = calculateBunkInfo(currentAttendance, lectures, subject, globalThreshold)
+      return { subject, ...stats, ...bunk, threshold: globalThreshold }
     })
     setBySubject(perSubject)
   }
@@ -60,7 +79,33 @@ export default function StatsScreen() {
     load()
   }
 
+  const handleArchive = async () => {
+    await archiveCurrentSemester()
+    setConfirmingArchive(false)
+    load()
+  }
+
   const ringColor = barColor(overall.percentage)
+
+  const getTrendData = async (subject: string) => {
+    const [attendance, lectures, semStart] = await Promise.all([
+      getAttendance(),
+      getLectures(),
+      getSemesterStartDate()
+    ])
+    return getAttendanceTrend(attendance, lectures, subject, semStart ?? getTodayDate())
+  }
+
+  const handleTrendPress = async (subject: string) => {
+    if (selectedTrendSubject === subject) {
+      setSelectedTrendSubject(null)
+      setTrendData([])
+      return
+    }
+    setSelectedTrendSubject(subject)
+    const data = await getTrendData(subject)
+    setTrendData(data)
+  }
 
   return (
     <SafeAreaView style={styles.container} edges={["left", "right"]}>
@@ -78,6 +123,27 @@ export default function StatsScreen() {
             </Text>
             <Text style={styles.heroSubMuted}>{overall.cancelled} cancelled (not counted)</Text>
           </View>
+        </View>
+
+        <View style={styles.semesterCard}>
+          <View style={styles.semesterRow}>
+            <View>
+              <Text style={styles.semesterLabel}>Current Semester</Text>
+              <Text style={styles.semesterDate}>{semesterStartDate}</Text>
+            </View>
+            <MdButton title="Archive & Start New" variant="outlined" onPress={() => setConfirmingArchive(true)} style={styles.semesterBtn} />
+          </View>
+          {confirmingArchive && (
+            <View style={styles.confirmCard}>
+              <Text style={styles.confirmText}>
+                This archives your current attendance and starts a fresh semester. Your timetable stays intact.
+              </Text>
+              <View style={styles.confirmButtons}>
+                <MdButton title="Cancel" variant="text" onPress={() => setConfirmingArchive(false)} />
+                <MdButton title="Archive" variant="danger" onPress={handleArchive} />
+              </View>
+            </View>
+          )}
         </View>
 
         <Text style={styles.sectionLabel}>BY SUBJECT</Text>
@@ -102,8 +168,56 @@ export default function StatsScreen() {
                 ]}
               />
             </View>
+
+            <View style={styles.bunkRow}>
+              {s.canSkip > 0 && (
+                <View style={styles.bunkItem}>
+                  <Text style={styles.bunkLabel}>Can skip</Text>
+                  <Text style={[styles.bunkValue, { color: colors.success }]}>{s.canSkip} more</Text>
+                </View>
+              )}
+              {s.mustAttend > 0 && (
+                <View style={styles.bunkItem}>
+                  <Text style={styles.bunkLabel}>Must attend</Text>
+                  <Text style={[styles.bunkValue, { color: colors.error }]}>{s.mustAttend} next</Text>
+                </View>
+              )}
+              {s.canSkip === 0 && s.mustAttend === 0 && s.present + s.absent > 0 && (
+                <Text style={styles.bunkNeutral}>On track</Text>
+              )}
+            </View>
+
+            <View style={styles.thresholdRow}>
+              <Text style={styles.thresholdLabel}>Threshold: {s.threshold}%</Text>
+              <MdButton
+                title={selectedTrendSubject === s.subject ? "Hide trend" : "Show trend"}
+                variant="text"
+                onPress={() => handleTrendPress(s.subject)}
+                style={styles.trendBtn}
+              />
+            </View>
+
+            {selectedTrendSubject === s.subject && trendData.length > 0 && (
+              <View style={styles.trendWrapper}>
+                <AttendanceChart
+                  subject={s.subject}
+                  threshold={s.threshold}
+                  data={trendData}
+                />
+              </View>
+            )}
           </View>
         ))}
+
+        {selectedTrendSubject && trendData.length > 0 && (
+          <View style={styles.trendCard}>
+            <AttendanceChart
+              subject={selectedTrendSubject}
+              threshold={bySubject.find(s => s.subject === selectedTrendSubject)?.threshold ?? 75}
+              data={trendData}
+            />
+          </View>
+        )}
 
         <View style={styles.resetWrap}>
           {confirmingReset ? (
