@@ -7,6 +7,7 @@
 //   the file in a spreadsheet - they're informational, not read back in, so
 //   editing them by hand doesn't affect anything (edit `status` instead).
 import { Attendance, AttendanceStatus, Lecture } from "../types"
+import { isValidDateString } from "./dateHelpers"
 
 const CSV_HEADER = "date,lectureId,subject,startTime,status"
 const VALID_STATUSES: AttendanceStatus[] = ["present", "absent", "cancelled"]
@@ -115,7 +116,7 @@ export const parseAttendanceCsv = (csvText: string): CsvImportResult => {
     const lectureId = (fields[lectureIdIdx] ?? "").trim()
     const statusRaw = (fields[statusIdx] ?? "").trim().toLowerCase()
 
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    if (!isValidDateString(date)) {
       skippedReasons.push(`Row ${rowNum}: invalid date "${date}" (expected YYYY-MM-DD)`)
       continue
     }
