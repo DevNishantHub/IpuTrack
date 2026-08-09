@@ -1,41 +1,49 @@
 // src/components/TimetableGrid.tsx
-import { useMemo } from "react"
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert } from "react-native"
+// Renders one day at a time behind a row of day tabs (Mon | Tue | ... ),
+// instead of a single wide grid with all days as columns. The old
+// all-days-as-columns grid had to be horizontally scrolled on narrower
+// phone screens, which was a poor experience - this avoids that entirely
+// since only one day's schedule is on screen at once.
+import { useMemo, useState } from "react"
+import { View, Text, StyleSheet, TouchableOpacity, Alert } from "react-native"
 import { Lecture, Break } from "../types"
-import { colors, radius } from "../theme"
-import { DAY_NAMES, toMinutes } from "../utils/dateHelpers"
+import { colors, radius, spacing } from "../theme"
+import { DAY_NAMES, toMinutes, getToday } from "../utils/dateHelpers"
 
-// Sunday is never used on this timetable, so only Mon-Sat render as columns.
+// Sunday is never used on this timetable, so only Mon-Sat render as tabs.
 const VISIBLE_DAYS = DAY_NAMES.map((_, i) => i).slice(1)
-
-const TIME_COL_WIDTH = 64
-const DAY_COL_WIDTH = 104
 
 type Props = {
   lectures: Lecture[]
   breaks: Break[]
-  // Omit onEdit/onDelete entirely to render a read-only grid, e.g. for the
+  // Omit onEdit/onDelete entirely to render a read-only view, e.g. for the
   // locked master timetable view.
   onEdit?: (lecture: Lecture) => void
   onDelete?: (id: string) => void
   onEmptyCellPress?: (day: number, startTime: string) => void
 }
 
+type AgendaRow = { time: string; lecture?: Lecture; isBreak?: boolean }
+
 export default function TimetableGrid({ lectures, breaks, onEdit, onDelete, onEmptyCellPress }: Props) {
   const readOnly = !onEdit && !onDelete
-  const rowTimes = useMemo(
-    () =>
-      Array.from(
-        new Set([...lectures.map(l => l.startTime), ...breaks.map(b => b.startTime)])
-      ).sort((a, b) => toMinutes(a) - toMinutes(b)),
-    [lectures, breaks]
-  )
 
-  const findLecture = (day: number, time: string) =>
-    lectures.find(l => l.day === day && l.startTime === time)
+  // Default to today if it's a visible weekday, otherwise the first tab (Mon).
+  const today = getToday()
+  const initialDay = VISIBLE_DAYS.includes(today) ? today : VISIBLE_DAYS[0]
+  const [selectedDay, setSelectedDay] = useState(initialDay)
 
-  const isBreak = (day: number, time: string) =>
-    breaks.some(b => b.day === day && b.startTime === time)
+  const rows: AgendaRow[] = useMemo(() => {
+    const dayLectures = lectures.filter(l => l.day === selectedDay)
+    const dayBreaks = breaks.filter(b => b.day === selectedDay)
+    const merged: AgendaRow[] = [
+      ...dayLectures.map(l => ({ time: l.startTime, lecture: l })),
+      ...dayBreaks
+        .filter(b => !dayLectures.some(l => l.startTime === b.startTime))
+        .map(b => ({ time: b.startTime, isBreak: true }))
+    ]
+    return merged.sort((a, b) => toMinutes(a.time) - toMinutes(b.time))
+  }, [lectures, breaks, selectedDay])
 
   const confirmDelete = (lecture: Lecture) => {
     if (!onDelete) return
@@ -49,73 +57,77 @@ export default function TimetableGrid({ lectures, breaks, onEdit, onDelete, onEm
     )
   }
 
-  if (rowTimes.length === 0) {
-    return <Text style={styles.empty}>No lectures added yet.</Text>
-  }
-
   return (
     <View style={styles.wrapper}>
-      <ScrollView horizontal showsHorizontalScrollIndicator={true}>
-        <View>
-          <View style={styles.row}>
-            <View style={[styles.cell, styles.headerCell, { width: TIME_COL_WIDTH }]} />
-            {VISIBLE_DAYS.map(day => (
-              <View key={day} style={[styles.cell, styles.headerCell, { width: DAY_COL_WIDTH }]}>
-                <Text style={styles.headerText}>{DAY_NAMES[day]}</Text>
+      <View style={styles.tabRow}>
+        {VISIBLE_DAYS.map(day => {
+          const active = day === selectedDay
+          return (
+            <TouchableOpacity
+              key={day}
+              style={[styles.tab, active && styles.tabActive]}
+              onPress={() => setSelectedDay(day)}
+              accessibilityRole="tab"
+              accessibilityState={{ selected: active }}
+            >
+              <Text style={[styles.tabText, active && styles.tabTextActive]}>{DAY_NAMES[day]}</Text>
+            </TouchableOpacity>
+          )
+        })}
+      </View>
+
+      <View style={styles.agenda}>
+        {rows.length === 0 && <Text style={styles.empty}>No lectures on {DAY_NAMES[selectedDay]}.</Text>}
+
+        {rows.map(row => {
+          if (row.isBreak) {
+            return (
+              <View key={row.time} style={styles.row}>
+                <View style={styles.timeCol}>
+                  <Text style={styles.timeText}>{row.time}</Text>
+                </View>
+                <View style={[styles.card, styles.breakCard]}>
+                  <Text style={styles.breakText}>BREAK</Text>
+                </View>
               </View>
-            ))}
-          </View>
+            )
+          }
 
-          {rowTimes.map(time => (
-            <View key={time} style={styles.row}>
-              <View style={[styles.cell, styles.timeCell, { width: TIME_COL_WIDTH }]}>
-                <Text style={styles.timeText}>{time}</Text>
+          const lecture = row.lecture!
+          return (
+            <View key={row.time} style={styles.row}>
+              <View style={styles.timeCol}>
+                <Text style={styles.timeText}>{lecture.startTime}</Text>
               </View>
-              {VISIBLE_DAYS.map(day => {
-                const lecture = findLecture(day, time)
-                const onBreak = !lecture && isBreak(day, time)
-
-                if (onBreak) {
-                  return (
-                    <View key={day} style={[styles.cell, styles.breakCell, { width: DAY_COL_WIDTH }]}>
-                      <Text style={styles.breakText}>BREAK</Text>
-                    </View>
-                  )
-                }
-
-                return (
-                  <TouchableOpacity
-                    key={day}
-                    style={[styles.cell, styles.dataCell, lecture && styles.dataCellFilled, { width: DAY_COL_WIDTH }]}
-                    disabled={readOnly && !lecture}
-                    onLongPress={lecture && onDelete ? () => confirmDelete(lecture) : undefined}
-                    onPress={
-                      lecture
-                        ? (onEdit ? () => onEdit(lecture) : undefined)
-                        : onEmptyCellPress
-                          ? () => onEmptyCellPress(day, time)
-                          : undefined
-                    }
-                  >
-                    {lecture && (
-                      <>
-                        <Text style={styles.subjectText} numberOfLines={2}>
-                          {lecture.subject}
-                        </Text>
-                        {lecture.note && (
-                          <Text style={styles.noteText} numberOfLines={1}>
-                            {lecture.note}
-                          </Text>
-                        )}
-                      </>
-                    )}
-                  </TouchableOpacity>
-                )
-              })}
+              <TouchableOpacity
+                style={[styles.card, styles.dataCard]}
+                disabled={readOnly}
+                onLongPress={onDelete ? () => confirmDelete(lecture) : undefined}
+                onPress={onEdit ? () => onEdit(lecture) : undefined}
+              >
+                <Text style={styles.subjectText} numberOfLines={2}>
+                  {lecture.subject}
+                </Text>
+                {lecture.note && (
+                  <Text style={styles.noteText} numberOfLines={1}>
+                    {lecture.note}
+                  </Text>
+                )}
+              </TouchableOpacity>
             </View>
-          ))}
-        </View>
-      </ScrollView>
+          )
+        })}
+
+        {!readOnly && onEmptyCellPress && (
+          <TouchableOpacity
+            style={styles.addRow}
+            onPress={() => onEmptyCellPress(selectedDay, rows.length ? rows[rows.length - 1].time : "09:00")}
+          >
+            <Text style={styles.addRowText}>+ Add to {DAY_NAMES[selectedDay]}</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+
       {!readOnly && <Text style={styles.hint}>Tap a lecture to edit · long-press to remove</Text>}
     </View>
   )
@@ -129,25 +141,51 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.divider
   },
-  row: { flexDirection: "row" },
-  cell: {
-    borderWidth: 0.5,
-    borderColor: colors.divider,
-    justifyContent: "center",
-    alignItems: "center",
-    minHeight: 52,
-    padding: 4
+  tabRow: {
+    flexDirection: "row",
+    backgroundColor: colors.background,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.divider
   },
-  headerCell: { backgroundColor: colors.primaryContainer },
-  headerText: { fontWeight: "700", fontSize: 13, color: colors.primaryDark },
-  timeCell: { backgroundColor: colors.background },
-  timeText: { fontSize: 11, color: colors.onSurfaceVariant },
-  dataCell: { backgroundColor: colors.surface },
-  dataCellFilled: { backgroundColor: colors.primaryContainer },
-  subjectText: { fontSize: 13, fontWeight: "600", textAlign: "center", color: colors.primaryDark },
-  noteText: { fontSize: 10, color: colors.onSurfaceVariant, textAlign: "center", marginTop: 2 },
-  breakCell: { backgroundColor: colors.neutralContainer },
-  breakText: { fontSize: 11, fontWeight: "700", color: colors.onSurfaceVariant },
-  empty: { color: colors.onSurfaceVariant, marginTop: 8 },
-  hint: { color: colors.onSurfaceVariant, fontSize: 11, padding: 8 }
+  tab: {
+    flex: 1,
+    paddingVertical: spacing(3),
+    alignItems: "center",
+    justifyContent: "center",
+    borderBottomWidth: 2,
+    borderBottomColor: "transparent"
+  },
+  tabActive: {
+    backgroundColor: colors.primaryContainer,
+    borderBottomColor: colors.primary
+  },
+  tabText: { fontSize: 13, fontWeight: "600", color: colors.onSurfaceVariant },
+  tabTextActive: { color: colors.primaryDark },
+  agenda: { padding: spacing(3) },
+  row: { flexDirection: "row", alignItems: "stretch", marginBottom: spacing(2) },
+  timeCol: { width: 56, justifyContent: "center", alignItems: "flex-start" },
+  timeText: { fontSize: 12, color: colors.onSurfaceVariant },
+  card: {
+    flex: 1,
+    borderRadius: radius.sm,
+    padding: spacing(3),
+    justifyContent: "center"
+  },
+  dataCard: { backgroundColor: colors.primaryContainer },
+  subjectText: { fontSize: 14, fontWeight: "600", color: colors.primaryDark },
+  noteText: { fontSize: 11, color: colors.onSurfaceVariant, marginTop: 2 },
+  breakCard: { backgroundColor: colors.neutralContainer, alignItems: "center" },
+  breakText: { fontSize: 12, fontWeight: "700", color: colors.onSurfaceVariant },
+  empty: { color: colors.onSurfaceVariant, paddingVertical: spacing(4), textAlign: "center" },
+  addRow: {
+    borderWidth: 1,
+    borderColor: colors.outline,
+    borderStyle: "dashed",
+    borderRadius: radius.sm,
+    padding: spacing(3),
+    alignItems: "center",
+    marginTop: spacing(1)
+  },
+  addRowText: { color: colors.primary, fontWeight: "600", fontSize: 13 },
+  hint: { color: colors.onSurfaceVariant, fontSize: 11, padding: spacing(2) }
 })
