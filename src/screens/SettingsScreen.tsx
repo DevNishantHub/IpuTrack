@@ -21,7 +21,7 @@ import {
 } from "../storage/storage"
 import { TIMETABLE_IMPORT_PROMPT, validateImportedTimetable } from "../utils/timetableImport"
 import { attendanceToCsv, parseAttendanceCsv } from "../utils/csv"
-import { getTodayDate } from "../utils/dateHelpers"
+import { getTodayDate, isValidDateString } from "../utils/dateHelpers"
 
 export default function SettingsScreen() {
   const [imported, setImported] = useState(false)
@@ -135,6 +135,10 @@ export default function SettingsScreen() {
 
   const handleSemesterDateChange = async () => {
     if (!semesterDateInput) return
+    if (!isValidDateString(semesterDateInput)) {
+      Alert.alert("Invalid date", "Please enter a valid date in YYYY-MM-DD format.")
+      return
+    }
     try {
       await setSemesterStartDate(semesterDateInput)
       setSemesterStartDate(semesterDateInput)
@@ -315,8 +319,9 @@ export default function SettingsScreen() {
               style={styles.input}
               value={semesterDateInput}
               onChangeText={t => setSemesterDateInput(t)}
-              placeholder={getTodayDate()}
-              keyboardType="datetime-pad"
+              placeholder={`${getTodayDate()} (YYYY-MM-DD)`}
+              keyboardType="numbers-and-punctuation"
+              autoCapitalize="none"
             />
             <MdButton
               title="Set date"
