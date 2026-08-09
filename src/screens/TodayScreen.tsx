@@ -100,8 +100,11 @@ export default function TodayScreen() {
   const mark = async (lectureId: string, status: AttendanceStatus) => {
     // Always keyed by the master lectureId + the viewed date, so backfilling
     // a past day writes attendance against that day, not today.
+    // Date.now() alone can collide if two marks land in the same
+    // millisecond (rapid taps); the random suffix makes IDs unique
+    // regardless of timing.
     await saveAttendance({
-      id: Date.now().toString(),
+      id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       lectureId,
       date: selectedDate,
       status
