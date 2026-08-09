@@ -74,7 +74,7 @@ export const validateImportedTimetable = (rawText: string): ImportValidationResu
     }
 
     lectures.push({
-      id: `import-${Date.now()}-${i}`,
+      id: `import-${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${i}`,
       subject: item.subject.trim(),
       day: item.day,
       startTime: item.startTime,
