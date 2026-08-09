@@ -3,7 +3,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage"
 import { Attendance, Lecture, Break, DayOverride, ArchivedSemester } from "../types"
 import { seedLectures } from "../data/seedLectures"
 import { seedBreaks } from "../data/seedBreaks"
-import { getTodayDate } from "../utils/dateHelpers"
+import { getTodayDate, isValidDateString } from "../utils/dateHelpers"
 
 const LECTURES_KEY = "lectures"
 const ATTENDANCE_KEY = "attendance"
@@ -12,6 +12,7 @@ const TIMETABLE_IMPORTED_KEY = "timetableImported"
 const OVERRIDES_KEY = "dayOverrides"
 const ATTENDANCE_THRESHOLD_KEY = "attendanceThreshold"
 const LOW_ATTENDANCE_NOTIFIED_KEY = "lowAttendanceNotified"
+const SUBJECT_THRESHOLDS_KEY = "subjectThresholds"
 const SEMESTER_START_DATE_KEY = "semesterStartDate"
 const ARCHIVED_SEMESTERS_KEY = "archivedSemesters"
 
@@ -36,13 +37,6 @@ export const getLectures = async (): Promise<Lecture[]> => {
   // First run: no timetable saved yet, so pre-fill with the default schedule.
   await AsyncStorage.setItem(LECTURES_KEY, JSON.stringify(seedLectures))
   return seedLectures
-}
-
-// Internal use only (e.g. seeding, or the guarded import flow). Screens should
-// not call this directly for the master timetable once it has been imported -
-// use setMasterTimetable instead, which also locks it in.
-export const saveLectures = async (lectures: Lecture[]): Promise<void> => {
-  await AsyncStorage.setItem(LECTURES_KEY, JSON.stringify(lectures))
 }
 
 // Whether the user has ever imported their own timetable via the AI-JSON
@@ -146,7 +140,8 @@ export const clearAllData = async (): Promise<void> => {
     TIMETABLE_IMPORTED_KEY,
     OVERRIDES_KEY,
     ATTENDANCE_THRESHOLD_KEY,
-    LOW_ATTENDANCE_NOTIFIED_KEY
+    LOW_ATTENDANCE_NOTIFIED_KEY,
+    SUBJECT_THRESHOLDS_KEY
   ])
 }
 
@@ -180,8 +175,60 @@ export const setLowAttendanceNotified = async (subject: string, notified: boolea
   await AsyncStorage.setItem(LOW_ATTENDANCE_NOTIFIED_KEY, JSON.stringify(map))
 }
 
+export const getSubjectThresholds = async (): Promise<Record<string, number>> => {
+  const raw = await AsyncStorage.getItem(SUBJECT_THRESHOLDS_KEY)
+  return raw ? safeJsonParse<Record<string, number>>(raw, {}) : {}
+}
+
+export const setSubjectThreshold = async (subject: string, value: number | null): Promise<void> => {
+  const map = await getSubjectThresholds()
+  if (value === null) {
+    delete map[subject]
+  } else {
+    map[subject] = value
+  }
+  await AsyncStorage.setItem(SUBJECT_THRESHOLDS_KEY, JSON.stringify(map))
+}
+
+// Pure resolution logic, single source of truth for how a subject's
+// effective threshold is derived from already-fetched data. All threshold
+// lookups (single or batch) route through this so the fallback rule only
+// lives in one place.
+const resolveThreshold = (
+  subject: string,
+  overrides: Record<string, number>,
+  globalThreshold: number
+): number => {
+  const override = overrides[subject]
+  return typeof override === "number" && !Number.isNaN(override) ? override : globalThreshold
+}
+
+// Fetches overrides + global threshold once, then resolves every subject
+// in memory. Use this when resolving thresholds for multiple subjects
+// (e.g. rendering a stats list) to avoid N separate storage round-trips.
+export const getEffectiveThresholds = async (
+  subjects: string[]
+): Promise<Record<string, number>> => {
+  const [overrides, globalThreshold] = await Promise.all([
+    getSubjectThresholds(),
+    getAttendanceThreshold()
+  ])
+  const result: Record<string, number> = {}
+  for (const subject of subjects) {
+    result[subject] = resolveThreshold(subject, overrides, globalThreshold)
+  }
+  return result
+}
+
+// Single-subject convenience wrapper over the same resolution logic, for
+// call sites that only need one subject's threshold (e.g. a notification
+// check for a single lecture).
 export const getEffectiveThreshold = async (subject: string): Promise<number> => {
-  return getAttendanceThreshold()
+  const [overrides, globalThreshold] = await Promise.all([
+    getSubjectThresholds(),
+    getAttendanceThreshold()
+  ])
+  return resolveThreshold(subject, overrides, globalThreshold)
 }
 
 // --- Semester management ---
@@ -191,6 +238,9 @@ export const getSemesterStartDate = async (): Promise<string | null> => {
 }
 
 export const setSemesterStartDate = async (date: string): Promise<void> => {
+  if (!isValidDateString(date)) {
+    throw new Error(`Invalid date string: "${date}". Expected YYYY-MM-DD.`)
+  }
   await AsyncStorage.setItem(SEMESTER_START_DATE_KEY, date)
 }
 
