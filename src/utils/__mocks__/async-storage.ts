@@ -10,5 +10,12 @@ export default {
   },
   multiRemove: async (keys: string[]) => {
     keys.forEach(k => store.delete(k))
-  }
+  },
+  // Not part of every real AsyncStorage call site in the app, but useful
+  // for tests to reset the mock's in-memory state between cases so one
+  // test's writes can't leak into the next.
+  clear: async () => {
+    store.clear()
+  },
+  getAllKeys: async () => Array.from(store.keys())
 }
