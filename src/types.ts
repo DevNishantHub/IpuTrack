@@ -40,3 +40,12 @@ export type ArchivedSemester = {
   attendance: Attendance[]
   lectures: Lecture[]
 }
+
+// A calendar date with no classes at all (college holiday, exam break,
+// etc). Deliberately NOT a DayOverride: it never writes/touches Attendance
+// or DayOverride rows, it just tells the UI "don't show markable lectures
+// for this date." Existing attendance for that date (if any) is untouched.
+export type Holiday = {
+  date: string // YYYY-MM-DD
+  label?: string
+}

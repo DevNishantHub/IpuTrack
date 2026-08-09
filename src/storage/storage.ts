@@ -1,9 +1,10 @@
 // src/storage/storage.ts
 import AsyncStorage from "@react-native-async-storage/async-storage"
-import { Attendance, Lecture, Break, DayOverride, ArchivedSemester } from "../types"
+import { Attendance, Lecture, Break, DayOverride, ArchivedSemester, Holiday } from "../types"
 import { seedLectures } from "../data/seedLectures"
 import { seedBreaks } from "../data/seedBreaks"
 import { getTodayDate, isValidDateString } from "../utils/dateHelpers"
+import { cancelAllClassReminders } from "../utils/notifications"
 
 const LECTURES_KEY = "lectures"
 const ATTENDANCE_KEY = "attendance"
@@ -15,6 +16,8 @@ const LOW_ATTENDANCE_NOTIFIED_KEY = "lowAttendanceNotified"
 const SUBJECT_THRESHOLDS_KEY = "subjectThresholds"
 const SEMESTER_START_DATE_KEY = "semesterStartDate"
 const ARCHIVED_SEMESTERS_KEY = "archivedSemesters"
+const HOLIDAYS_KEY = "holidays"
+const REMINDER_SETTINGS_KEY = "reminderSettings"
 
 export const DEFAULT_ATTENDANCE_THRESHOLD = 75
 
@@ -141,8 +144,14 @@ export const clearAllData = async (): Promise<void> => {
     OVERRIDES_KEY,
     ATTENDANCE_THRESHOLD_KEY,
     LOW_ATTENDANCE_NOTIFIED_KEY,
-    SUBJECT_THRESHOLDS_KEY
+    SUBJECT_THRESHOLDS_KEY,
+    HOLIDAYS_KEY,
+    REMINDER_SETTINGS_KEY
   ])
+  // Best-effort: scheduled reminders reference lecture ids/text that are
+  // about to be gone. cancelAllClassReminders already swallows its own
+  // errors, so this can't make a reset fail partway through.
+  await cancelAllClassReminders()
 }
 
 export const getAttendanceThreshold = async (): Promise<number> => {
@@ -274,4 +283,77 @@ export const archiveCurrentSemester = async (): Promise<void> => {
   // Clear current attendance, keep lectures, set new semester start
   await AsyncStorage.setItem(ATTENDANCE_KEY, JSON.stringify([]))
   await setSemesterStartDate(getTodayDate())
+}
+
+// --- Holidays ---
+// A holiday is a pure calendar-level fact ("no classes on this date"),
+// stored entirely separately from Attendance and DayOverride. Marking a
+// date a holiday never writes, edits, or deletes any Attendance or
+// DayOverride row - it only tells the UI to stop offering that date's
+// lectures for marking. If attendance was already recorded for that date
+// (e.g. the user marked it before realizing/declaring it a holiday), that
+// history is left completely intact and simply hidden from the "mark
+// attendance" flow, not deleted.
+
+export const getHolidays = async (): Promise<Holiday[]> => {
+  const raw = await AsyncStorage.getItem(HOLIDAYS_KEY)
+  return raw ? safeJsonParse<Holiday[]>(raw, []) : []
+}
+
+export const getHolidayForDate = async (date: string): Promise<Holiday | null> => {
+  const holidays = await getHolidays()
+  return holidays.find(h => h.date === date) ?? null
+}
+
+export const addHoliday = async (date: string, label?: string): Promise<void> => {
+  if (!isValidDateString(date)) {
+    throw new Error(`Invalid date string: "${date}". Expected YYYY-MM-DD.`)
+  }
+  const holidays = await getHolidays()
+  // Replace any existing entry for the same date rather than duplicating.
+  const updated = holidays.filter(h => h.date !== date)
+  updated.push({ date, label: label?.trim() ? label.trim() : undefined })
+  updated.sort((a, b) => a.date.localeCompare(b.date))
+  await AsyncStorage.setItem(HOLIDAYS_KEY, JSON.stringify(updated))
+}
+
+export const removeHoliday = async (date: string): Promise<void> => {
+  const holidays = await getHolidays()
+  const updated = holidays.filter(h => h.date !== date)
+  await AsyncStorage.setItem(HOLIDAYS_KEY, JSON.stringify(updated))
+}
+
+// --- Class reminder settings ---
+export type ReminderSettings = { enabled: boolean; minutesBefore: number }
+
+export const DEFAULT_REMINDER_MINUTES_BEFORE = 10
+const MIN_REMINDER_MINUTES = 1
+const MAX_REMINDER_MINUTES = 180
+
+export const getReminderSettings = async (): Promise<ReminderSettings> => {
+  const raw = await AsyncStorage.getItem(REMINDER_SETTINGS_KEY)
+  const fallback: ReminderSettings = { enabled: false, minutesBefore: DEFAULT_REMINDER_MINUTES_BEFORE }
+  if (!raw) return fallback
+
+  const parsed = safeJsonParse<Partial<ReminderSettings>>(raw, {})
+  const minutesBefore =
+    typeof parsed.minutesBefore === "number" &&
+      Number.isFinite(parsed.minutesBefore) &&
+      parsed.minutesBefore >= MIN_REMINDER_MINUTES &&
+      parsed.minutesBefore <= MAX_REMINDER_MINUTES
+      ? parsed.minutesBefore
+      : DEFAULT_REMINDER_MINUTES_BEFORE
+
+  return { enabled: !!parsed.enabled, minutesBefore }
+}
+
+export const setReminderSettings = async (settings: ReminderSettings): Promise<void> => {
+  if (
+    !Number.isFinite(settings.minutesBefore) ||
+    settings.minutesBefore < MIN_REMINDER_MINUTES ||
+    settings.minutesBefore > MAX_REMINDER_MINUTES
+  ) {
+    throw new Error(`minutesBefore must be between ${MIN_REMINDER_MINUTES} and ${MAX_REMINDER_MINUTES}.`)
+  }
+  await AsyncStorage.setItem(REMINDER_SETTINGS_KEY, JSON.stringify(settings))
 }
