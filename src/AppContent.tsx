@@ -1,18 +1,21 @@
 // src/AppContent.tsx
 import { useEffect } from "react"
+import { View, Text, TouchableOpacity, StyleSheet } from "react-native"
 import { NavigationContainer, DefaultTheme } from "@react-navigation/native"
-import { createBottomTabNavigator } from "@react-navigation/bottom-tabs"
+import { createMaterialTopTabNavigator } from "@react-navigation/material-top-tabs"
+import type { MaterialTopTabBarProps } from "@react-navigation/material-top-tabs"
 import { MaterialIcons } from "@expo/vector-icons"
 import { StatusBar } from "expo-status-bar"
+import { SafeAreaView, SafeAreaProvider } from "react-native-safe-area-context"
 
 import TodayScreen from "./screens/TodayScreen"
 import TimetableScreen from "./screens/TimetableScreen"
 import StatsScreen from "./screens/StatsScreen"
 import SettingsScreen from "./screens/SettingsScreen"
-import { colors } from "./theme"
+import { colors, spacing } from "./theme"
 import { ensureNotificationPermission } from "./utils/notifications"
 
-const Tab = createBottomTabNavigator()
+const Tab = createMaterialTopTabNavigator()
 
 const navTheme = {
   ...DefaultTheme,
@@ -32,6 +35,49 @@ const ICONS: Record<string, keyof typeof MaterialIcons.glyphMap> = {
   Settings: "settings"
 }
 
+// Renders like the original bottom tab bar (icon + label per screen), but
+// sits on top of a swipeable material-top-tabs navigator so tapping a tab
+// still works exactly as before while dragging left/right between screens
+// now also works.
+function BottomStyleTabBar({ state, descriptors, navigation }: MaterialTopTabBarProps) {
+  return (
+    <SafeAreaView edges={["bottom"]} style={styles.tabBar}>
+      {state.routes.map((route, index) => {
+        const { options } = descriptors[route.key]
+        const isFocused = state.index === index
+        const label =
+          typeof options.tabBarLabel === "string" ? options.tabBarLabel : route.name
+
+        const onPress = () => {
+          const event = navigation.emit({
+            type: "tabPress",
+            target: route.key,
+            canPreventDefault: true
+          })
+          if (!isFocused && !event.defaultPrevented) {
+            navigation.navigate(route.name)
+          }
+        }
+
+        const color = isFocused ? colors.primary : colors.onSurfaceVariant
+
+        return (
+          <TouchableOpacity
+            key={route.key}
+            accessibilityRole="button"
+            accessibilityState={isFocused ? { selected: true } : {}}
+            onPress={onPress}
+            style={styles.tabItem}
+          >
+            <MaterialIcons name={ICONS[route.name]} size={24} color={color} />
+            <Text style={[styles.tabLabel, { color }]}>{label}</Text>
+          </TouchableOpacity>
+        )
+      })}
+    </SafeAreaView>
+  )
+}
+
 export default function App() {
   useEffect(() => {
     ensureNotificationPermission()
@@ -46,33 +92,45 @@ export default function App() {
   }, [])
 
   return (
-    <NavigationContainer theme={navTheme}>
-      <StatusBar style="dark" />
-      <Tab.Navigator
-        screenOptions={({ route }) => ({
-          headerTitleStyle: { fontWeight: "600", fontSize: 20, color: colors.onSurface },
-          headerStyle: { backgroundColor: colors.surface, elevation: 0, shadowOpacity: 0 },
-          headerShadowVisible: false,
-          tabBarActiveTintColor: colors.primary,
-          tabBarInactiveTintColor: colors.onSurfaceVariant,
-          tabBarStyle: {
-            backgroundColor: colors.surface,
-            borderTopColor: colors.divider,
-            height: 60,
-            paddingBottom: 8,
-            paddingTop: 6
-          },
-          tabBarLabelStyle: { fontSize: 12, fontWeight: "500" },
-          tabBarIcon: ({ color, size }) => (
-            <MaterialIcons name={ICONS[route.name]} size={size} color={color} />
-          )
-        })}
-      >
-        <Tab.Screen name="Today" component={TodayScreen} />
-        <Tab.Screen name="Timetable" component={TimetableScreen} />
-        <Tab.Screen name="Stats" component={StatsScreen} />
-        <Tab.Screen name="Settings" component={SettingsScreen} />
-      </Tab.Navigator>
-    </NavigationContainer>
+    <SafeAreaProvider>
+      <NavigationContainer theme={navTheme}>
+        <StatusBar style="dark" />
+        <Tab.Navigator
+          tabBarPosition="bottom"
+          tabBar={props => <BottomStyleTabBar {...props} />}
+          screenOptions={{
+            swipeEnabled: true,
+            animationEnabled: true,
+            lazy: true
+          }}
+        >
+          <Tab.Screen name="Today" component={TodayScreen} />
+          <Tab.Screen name="Timetable" component={TimetableScreen} />
+          <Tab.Screen name="Stats" component={StatsScreen} />
+          <Tab.Screen name="Settings" component={SettingsScreen} />
+        </Tab.Navigator>
+      </NavigationContainer>
+    </SafeAreaProvider>
   )
 }
+
+const styles = StyleSheet.create({
+  tabBar: {
+    flexDirection: "row",
+    backgroundColor: colors.surface,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.divider
+  },
+  tabItem: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingTop: spacing(1.5),
+    paddingBottom: spacing(1)
+  },
+  tabLabel: {
+    fontSize: 12,
+    fontWeight: "500",
+    marginTop: 2
+  }
+})
