@@ -24,6 +24,10 @@ export const notifyLowAttendance = async (
   percentage: number,
   threshold: number
 ): Promise<void> => {
+  // Subject comes from AI-imported timetable JSON, not a trusted source -
+  // strip control/newline chars and cap length before it lands in a
+  // notification body.
+  const safeSubject = subject.replace(/[\r\n\t]/g, " ").trim().slice(0, 50)
   try {
     await Notifications.setNotificationChannelAsync(CHANNEL_ID, {
       name: "Low Attendance",
@@ -33,7 +37,7 @@ export const notifyLowAttendance = async (
     await Notifications.scheduleNotificationAsync({
       content: {
         title: "Attendance is low",
-        body: `${subject} is at ${percentage}%, below your ${threshold}% target.`,
+        body: `${safeSubject} is at ${percentage}%, below your ${threshold}% target.`,
       },
       trigger: null,
     })
