@@ -207,7 +207,7 @@ export default function TodayScreen() {
   })
 
   return (
-    <SafeAreaView style={styles.container} edges={["left", "right"]}>
+    <SafeAreaView style={styles.container} edges={["top", "left", "right"]}>
       <ScrollView contentContainerStyle={styles.scroll}>
         <View style={styles.dateNavRow}>
           <TouchableOpacity

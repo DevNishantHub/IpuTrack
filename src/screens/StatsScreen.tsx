@@ -115,7 +115,7 @@ export default function StatsScreen() {
   }
 
   return (
-    <SafeAreaView style={styles.container} edges={["left", "right"]}>
+    <SafeAreaView style={styles.container} edges={["top", "left", "right"]}>
       <ScrollView contentContainerStyle={styles.scroll}>
         <View style={styles.heroCard}>
           <View style={[styles.ring, { borderColor: ringColor }]}>
@@ -154,6 +154,16 @@ export default function StatsScreen() {
         </View>
 
         <Text style={styles.sectionLabel}>BY SUBJECT</Text>
+
+        {selectedTrendSubject && trendData.length > 0 && (
+          <View style={styles.trendCard}>
+            <AttendanceChart
+              subject={selectedTrendSubject}
+              threshold={bySubject.find(s => s.subject === selectedTrendSubject)?.threshold ?? threshold}
+              data={trendData}
+            />
+          </View>
+        )}
 
         {bySubject.length === 0 && (
           <Text style={styles.empty}>No lectures added yet.</Text>
@@ -206,16 +216,6 @@ export default function StatsScreen() {
 
           </View>
         ))}
-
-        {selectedTrendSubject && trendData.length > 0 && (
-          <View style={styles.trendCard}>
-            <AttendanceChart
-              subject={selectedTrendSubject}
-              threshold={bySubject.find(s => s.subject === selectedTrendSubject)?.threshold ?? threshold}
-              data={trendData}
-            />
-          </View>
-        )}
 
         <View style={styles.resetWrap}>
           {confirmingReset ? (

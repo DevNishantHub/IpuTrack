@@ -763,3 +763,4 @@ const styles = StyleSheet.create({
   holidayRowDate: { ...typo.body, fontWeight: "600" },
   holidayRowLabel: { fontSize: 12, color: colors.onSurfaceVariant, marginTop: 2 }
 })
+
