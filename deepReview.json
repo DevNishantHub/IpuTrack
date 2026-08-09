@@ -1,0 +1,172 @@
+{
+  "reviewDate": "2026-08-09",
+  "codebase": "attendance-app-fixed",
+  "summary": "React Native (Expo) attendance tracking app with good architectural foundations but missing test coverage and some defensive programming gaps.",
+  "findings": [
+    {
+      "category": "testing",
+      "severity": "high",
+      "file": "package.json",
+      "line": 1,
+      "title": "No test infrastructure or test files in project",
+      "description": "The codebase has zero unit tests, integration tests, or E2E tests. The testing pyramid (many unit tests, fewer integration, minimal E2E) is completely absent. This means bugs in attendance calculations, date handling, CSV parsing, and storage operations have no regression protection.",
+      "recommendation": "Add Jest + React Native Testing Library for unit tests. Priority test targets: calculateStats, calculateBunkInfo, getAttendanceTrend, parseAttendanceCsv, validateImportedTimetable, safeJsonParse, dateHelpers functions. Add CI step to run tests on every commit."
+    },
+    {
+      "category": "testing",
+      "severity": "high",
+      "file": "src/utils/attendance.ts",
+      "line": 18,
+      "title": "calculateBunkInfo has complex math without tests",
+      "description": "The bunk calculation uses floor/ceil formulas for canSkip/mustAttend with threshold comparisons. Edge cases (threshold=100, threshold=0, present=0, futureClasses=0) are untested. A bug here gives wrong skip/attend advice to students.",
+      "recommendation": "Write unit tests covering: threshold at boundaries (1, 75, 100), zero attendance, perfect attendance, exactly at threshold, fractional percentages. Test-driven bug fix approach for any future issues."
+    },
+    {
+      "category": "testing",
+      "severity": "medium",
+      "file": "src/utils/csv.ts",
+      "line": 85,
+      "title": "parseAttendanceCsv lacks tests for malformed input",
+      "description": "CSV parser handles quoted fields, escaped quotes, missing columns, invalid dates/statuses. No tests verify the splitCsvLine logic or the skip/continue behavior for bad rows. Silent data loss risk if parsing diverges from user's spreadsheet format.",
+      "recommendation": "Test: valid CSV round-trip, quoted fields with commas, escaped quotes, missing required columns, invalid date formats, invalid status values, empty file, header-only file, extra columns ignored."
+    },
+    {
+      "category": "defensive-programming",
+      "severity": "medium",
+      "file": "src/storage/storage.ts",
+      "line": 33,
+      "title": "getLectures silently returns seed data on parse failure",
+      "description": "safeJsonParse logs a warning but returns fallback (seedLectures) on JSON parse error. This masks corrupted AsyncStorage data - user sees default schedule instead of their imported timetable with no error indication.",
+      "recommendation": "Add a migration/repair flow: if parse fails, surface error to user with option to reset or recover from backup. At minimum, alert user that data was corrupted and defaults restored."
+    },
+    {
+      "category": "defensive-programming",
+      "severity": "medium",
+      "file": "src/storage/storage.ts",
+      "line": 155,
+      "title": "getAttendanceThreshold returns default on NaN without user feedback",
+      "description": "If stored threshold is non-numeric string, parseInt returns NaN, function returns DEFAULT_ATTENDANCE_THRESHOLD silently. User's custom threshold is lost with no indication.",
+      "recommendation": "Validate on write (setAttendanceThreshold) to reject non-numeric values. On read, if parse fails, log error and alert user their threshold was reset."
+    },
+    {
+      "category": "defensive-programming",
+      "severity": "low",
+      "file": "src/utils/dateHelpers.ts",
+      "line": 24,
+      "title": "parseLocalDate uses string concatenation for Date construction",
+      "description": "`new Date(\`${dateStr}T00:00:00\`)` relies on ISO string parsing which can vary by engine/locale. Safer to use `new Date(year, month-1, day)` with parsed components.",
+      "recommendation": "Refactor parseLocalDate to parse year/month/day components and construct Date with `new Date(year, month - 1, day)` for consistent local-time behavior."
+    },
+    {
+      "category": "defensive-programming",
+      "severity": "medium",
+      "file": "src/screens/TodayScreen.tsx",
+      "line: 100,
+      "title": "mark() uses Date.now() for attendance ID - collision risk",
+      "description": "Attendance ID generated as `Date.now().toString()`. Rapid taps or concurrent marks could generate duplicate IDs, causing saveAttendance to deduplicate incorrectly (last write wins).",
+      "recommendation": "Use `crypto.randomUUID()` or `Date.now() + '-' + Math.random().toString(36).slice(2)` for uniqueness. Or let storage layer generate IDs."
+    },
+    {
+      "category": "defensive-programming",
+      "severity": "medium",
+      "file": "src/utils/timetableImport.ts",
+      "line: 77,
+      "title": "validateImportedTimetable generates IDs with Date.now() - collision risk",
+      "description": "Imported lecture IDs use `import-${Date.now()}-${i}`. If user imports twice in same millisecond, IDs collide. Low probability but possible.",
+      "recommendation": "Use `crypto.randomUUID()` or add a counter/suffix to ensure uniqueness across rapid imports."
+    },
+    {
+      "category": "architecture",
+      "severity": "low",
+      "file": "src/storage/storage.ts",
+      "line: 45,
+      "title": "saveLectures exported but documented as internal-only",
+      "description": "Function is exported and callable from screens despite comment saying 'Internal use only'. No TypeScript `private` or module-level encapsulation prevents misuse.",
+      "recommendation": "Either make truly internal (don't export, or prefix with _), or remove the comment if external use is valid. Consider splitting storage into public API and internal modules."
+    },
+    {
+      "category": "code-quality",
+      "severity": "low",
+      "file": "src/screens/TodayScreen.tsx",
+      "line: 63,
+      "title": "load() function does too many things (40 lines)",
+      "description": "load() fetches data, merges overrides, filters cancelled, sorts by time, updates multiple state variables. Hard to test in isolation. Violates single responsibility.",
+      "recommendation": "Extract: `mergeOverrides(lectures, overrides, date)`, `filterCancelled(lectures, overrides)`, `sortByTime(lectures)`. Keep load() as orchestration only."
+    },
+    {
+      "category": "code-quality",
+      "severity": "low",
+      "file": "src/screens/StatsScreen.tsx",
+      "line: 49,
+      "title": "load() in StatsScreen mixes data fetching with business logic",
+      "description": "load() fetches 5 data sources, filters by semester, calculates stats per subject, calculates bunk info, updates 3 state variables. Hard to unit test the calculation logic separately from storage.",
+      "recommendation": "Extract pure functions: `filterBySemester(attendance, startDate)`, `computeSubjectStats(attendance, lectures, thresholds)`. Test those in isolation."
+    },
+    {
+      "category": "code-quality",
+      "severity": "low",
+      "file": "src/components/TimetableGrid.tsx",
+      "line: 25,
+      "title": "rowTimes recomputed on every render without memoization",
+      "description": "rowTimes derived from lectures+breaks arrays using Set+sort on every render. Lectures/breaks rarely change but component may re-render from parent state changes.",
+      "recommendation": "Wrap rowTimes in `useMemo` with `[lectures, breaks]` deps. Or compute once in parent and pass as prop."
+    },
+    {
+      "category": "security",
+      "severity": "low",
+      "file": "src/utils/notifications.ts",
+      "line: 36,
+      "title": "Notification content uses user-controlled subject string without sanitization",
+      "description": "Subject comes from lecture data which originates from AI-imported JSON. If AI returns malicious string with newlines/control chars, notification body could be manipulated. Low risk (local notifications only) but worth fixing.",
+      "recommendation": "Sanitize subject: `subject.replace(/[\n\r]/g, ' ').slice(0, 50)` before embedding in notification body."
+    },
+    {
+      "category": "architecture",
+      "severity": "low",
+      "file": "src/types.ts",
+      "line: 1,
+      "title": "Types file mixes domain types with storage-specific types",
+      "description": "Lecture, Break, Attendance are domain types. DayOverride, ArchivedSemester are storage-specific. Mixing makes it harder to evolve storage schema without touching domain.",
+      "recommendation": "Separate into `domain.ts` (Lecture, Break, Attendance, AttendanceStatus) and `storage.ts` (DayOverride, ArchivedSemester). Import storage types only in storage layer."
+    },
+    {
+      "category": "defensive-programming",
+      "severity": "medium",
+      "file": "src/utils/attendance.ts",
+      "line: 106,
+      "title": "checkLowAttendanceAndNotify fetches threshold inside loop potential",
+      "description": "Function calls getEffectiveThreshold(subject) which does Promise.all([getSubjectThresholds, getAttendanceThreshold]). If called multiple times rapidly (e.g., marking multiple lectures same subject), redundant storage reads.",
+      "recommendation": "Pass threshold as parameter, or memoize getEffectiveThreshold per subject per render cycle. Caller (TodayScreen.mark) already has allLectures/allAttendance - could compute threshold there."
+    },
+    {
+      "category": "code-quality",
+      "severity": "low",
+      "file": "src/components/AttendanceChart.tsx",
+      "line: 20,
+      "title": "Chart uses Dimensions.get('window') on every render",
+      "description": "Width fetched in component body, not memoized. Triggers re-layout on every parent re-render even if data unchanged.",
+      "recommendation": "Use `useWindowDimensions()` hook or memoize width with `useMemo(() => Dimensions.get('window').width, [])`."
+    }
+  ],
+  "positivePatterns": [
+    "safeJsonParse defensive parsing with fallback prevents app crashes on corrupted storage",
+    "clear separation of master timetable vs day overrides (immutable master, ephemeral overrides)",
+    "semester archiving preserves history while resetting current tracking",
+    "CSV export/import with human-readable columns for backup/editing",
+    "TypeScript strict mode with proper discriminated unions for AttendanceStatus",
+    "Notification permission handled gracefully with fallback logging",
+    "Material Design theming system with consistent tokens (colors, spacing, radius, type)",
+    "Composed MdButton component with variant system instead of inline styles",
+    "Date helpers use local-time parsing to avoid timezone off-by-one bugs",
+    "AI import flow with strict validation and clear error messages for user to fix in AI"
+  ],
+  "metrics": {
+    "filesReviewed": 15,
+    "linesOfCode": 2800,
+    "testFiles": 0,
+    "testCoverage": "0%",
+    "highSeverityFindings": 2,
+    "mediumSeverityFindings": 6,
+    "lowSeverityFindings": 8
+  }
+}
