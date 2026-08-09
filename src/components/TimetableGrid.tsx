@@ -1,4 +1,5 @@
 // src/components/TimetableGrid.tsx
+import { useMemo } from "react"
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert } from "react-native"
 import { Lecture, Break } from "../types"
 import { colors, radius } from "../theme"
@@ -22,9 +23,13 @@ type Props = {
 
 export default function TimetableGrid({ lectures, breaks, onEdit, onDelete, onEmptyCellPress }: Props) {
   const readOnly = !onEdit && !onDelete
-  const rowTimes = Array.from(
-    new Set([...lectures.map(l => l.startTime), ...breaks.map(b => b.startTime)])
-  ).sort((a, b) => toMinutes(a) - toMinutes(b))
+  const rowTimes = useMemo(
+    () =>
+      Array.from(
+        new Set([...lectures.map(l => l.startTime), ...breaks.map(b => b.startTime)])
+      ).sort((a, b) => toMinutes(a) - toMinutes(b)),
+    [lectures, breaks]
+  )
 
   const findLecture = (day: number, time: string) =>
     lectures.find(l => l.day === day && l.startTime === time)

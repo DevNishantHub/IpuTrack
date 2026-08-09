@@ -1,8 +1,8 @@
 // src/components/AttendanceChart.tsx
 import { useMemo } from "react"
-import { View, Text, StyleSheet, Dimensions } from "react-native"
+import { View, Text, StyleSheet, useWindowDimensions } from "react-native"
 import { CartesianChart, Line } from "victory-native"
-import { matchFont } from "@shopify/react-native-skia"
+import { matchFont, DashPathEffect } from "@shopify/react-native-skia"
 import { colors, spacing, type as typo } from "../theme"
 
 type TrendPoint = { date: string; percentage: number }
@@ -17,7 +17,7 @@ type AttendanceChartProps = {
 type ChartRow = { x: number; y: number; threshold: number }
 
 export default function AttendanceChart({ data, subject, threshold = 75, height = 200 }: AttendanceChartProps) {
-  const { width } = Dimensions.get("window")
+  const { width } = useWindowDimensions()
   const chartWidth = width - spacing(8)
 
   const axisFont = useMemo(() => {
@@ -93,8 +93,9 @@ export default function AttendanceChart({ data, subject, threshold = 75, height 
                 color={colors.error}
                 strokeWidth={1}
                 curveType="natural"
-                dashArray={[5, 5]}
-              />
+              >
+                <DashPathEffect intervals={[5, 5]} />
+              </Line>
               <Line
                 points={points.y}
                 color={colors.primary}
