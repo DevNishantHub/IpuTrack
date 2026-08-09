@@ -50,12 +50,12 @@ const record = (id: string, lectureId: string, date: string, status: Attendance[
 })
 
 describe("getLectures / setMasterTimetable / isTimetableImported", () => {
-  it("seeds lectures on first read and persists them", async () => {
+  it("returns an empty list on first read with no seeded placeholder data", async () => {
     const first = await getLectures()
-    expect(first.length).toBeGreaterThan(0)
+    expect(first).toEqual([])
+    // Nothing should be written to storage just from reading.
     const raw = await AsyncStorage.getItem("lectures")
-    expect(raw).not.toBeNull()
-    expect(JSON.parse(raw as string)).toEqual(first)
+    expect(raw).toBeNull()
   })
 
   it("is not marked imported until setMasterTimetable is called", async () => {
@@ -74,14 +74,12 @@ describe("getLectures / setMasterTimetable / isTimetableImported", () => {
   it("setMasterTimetable with an empty array clears the timetable (not treated as unset)", async () => {
     await setMasterTimetable([])
     expect(await getLectures()).toEqual([])
-    // must NOT fall back to reseeding, since raw="[]" is truthy-empty, not null
   })
 
-  it("falls back to seed data if stored lectures JSON is corrupted", async () => {
+  it("falls back to an empty list if stored lectures JSON is corrupted", async () => {
     await AsyncStorage.setItem("lectures", "{not valid json")
     const lectures = await getLectures()
-    expect(Array.isArray(lectures)).toBe(true)
-    expect(lectures.length).toBeGreaterThan(0)
+    expect(lectures).toEqual([])
   })
 })
 
@@ -143,9 +141,9 @@ describe("day overrides", () => {
 })
 
 describe("breaks", () => {
-  it("seeds breaks on first read", async () => {
+  it("returns an empty list on first read with no seeded placeholder data", async () => {
     const breaks = await getBreaks()
-    expect(Array.isArray(breaks)).toBe(true)
+    expect(breaks).toEqual([])
   })
 
   it("saveBreaks overwrites stored breaks fully", async () => {
@@ -257,8 +255,9 @@ describe("clearAllData", () => {
     expect(await getSubjectThresholds()).toEqual({})
     expect(await getHolidays()).toEqual([])
     expect(await getReminderSettings()).toEqual({ enabled: false, minutesBefore: DEFAULT_REMINDER_MINUTES_BEFORE })
-    // lectures key removed too, so next getLectures() call reseeds
+    // lectures key removed too, so next getLectures() call returns []
     expect(await isTimetableImported()).toBe(false)
+    expect(await getLectures()).toEqual([])
   })
 
   it("does NOT wipe archived semesters (archive history survives a reset)", async () => {

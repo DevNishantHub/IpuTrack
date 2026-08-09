@@ -1,8 +1,6 @@
 // src/storage/storage.ts
 import AsyncStorage from "@react-native-async-storage/async-storage"
 import { Attendance, Lecture, Break, DayOverride, ArchivedSemester, Holiday } from "../types"
-import { seedLectures } from "../data/seedLectures"
-import { seedBreaks } from "../data/seedBreaks"
 import { getTodayDate, isValidDateString } from "../utils/dateHelpers"
 import { cancelAllClassReminders } from "../utils/notifications"
 
@@ -33,17 +31,18 @@ function safeJsonParse<T>(raw: string, fallback: T): T {
   }
 }
 
+// No placeholder/seed data: until the user imports their own timetable via
+// Settings, this returns an empty list rather than pre-filling a sample
+// schedule. isTimetableImported()/getLectures().length can both be used to
+// tell "not set up yet" from "set up but currently empty".
 export const getLectures = async (): Promise<Lecture[]> => {
   const raw = await AsyncStorage.getItem(LECTURES_KEY)
-  if (raw) return safeJsonParse<Lecture[]>(raw, seedLectures)
-
-  // First run: no timetable saved yet, so pre-fill with the default schedule.
-  await AsyncStorage.setItem(LECTURES_KEY, JSON.stringify(seedLectures))
-  return seedLectures
+  return raw ? safeJsonParse<Lecture[]>(raw, []) : []
 }
 
 // Whether the user has ever imported their own timetable via the AI-JSON
-// flow. Until this is true, the seed/default schedule is just a placeholder.
+// flow. Until this is true, getLectures()/getBreaks() return empty lists -
+// there is no seeded placeholder schedule.
 export const isTimetableImported = async (): Promise<boolean> => {
   const raw = await AsyncStorage.getItem(TIMETABLE_IMPORTED_KEY)
   return raw === "true"
@@ -97,10 +96,7 @@ export const pruneExpiredOverrides = async (todayDate: string): Promise<void> =>
 
 export const getBreaks = async (): Promise<Break[]> => {
   const raw = await AsyncStorage.getItem(BREAKS_KEY)
-  if (raw) return safeJsonParse<Break[]>(raw, seedBreaks)
-
-  await AsyncStorage.setItem(BREAKS_KEY, JSON.stringify(seedBreaks))
-  return seedBreaks
+  return raw ? safeJsonParse<Break[]>(raw, []) : []
 }
 
 export const saveBreaks = async (breaks: Break[]): Promise<void> => {

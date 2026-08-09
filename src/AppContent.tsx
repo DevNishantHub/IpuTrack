@@ -1,7 +1,7 @@
 // src/AppContent.tsx
 import { useEffect } from "react"
-import { View, Text, TouchableOpacity, StyleSheet } from "react-native"
-import { NavigationContainer, DefaultTheme } from "@react-navigation/native"
+import { View, Text, TouchableOpacity, StyleSheet, Alert } from "react-native"
+import { NavigationContainer, DefaultTheme, createNavigationContainerRef } from "@react-navigation/native"
 import { createMaterialTopTabNavigator } from "@react-navigation/material-top-tabs"
 import type { MaterialTopTabBarProps } from "@react-navigation/material-top-tabs"
 import { MaterialIcons } from "@expo/vector-icons"
@@ -14,9 +14,13 @@ import StatsScreen from "./screens/StatsScreen"
 import SettingsScreen from "./screens/SettingsScreen"
 import { colors, spacing } from "./theme"
 import { ensureNotificationPermission, scheduleClassReminders } from "./utils/notifications"
-import { getReminderSettings, getLectures } from "./storage/storage"
+import { getReminderSettings, getLectures, isTimetableImported } from "./storage/storage"
 
 const Tab = createMaterialTopTabNavigator()
+
+// Lets the "go to Settings" popup below navigate without needing to be
+// rendered inside the Tab.Navigator itself.
+const navigationRef = createNavigationContainerRef()
 
 const navTheme = {
   ...DefaultTheme,
@@ -81,6 +85,33 @@ function BottomStyleTabBar({ state, descriptors, navigation }: MaterialTopTabBar
 
 export default function App() {
   useEffect(() => {
+    // Cold-start check: with no seeded/placeholder data, a fresh install has
+    // an empty timetable until the user imports their own via Settings.
+    // Nudge them there right away instead of leaving Today/Timetable blank
+    // with no explanation.
+    isTimetableImported()
+      .then(imported => {
+        if (imported) return
+        Alert.alert(
+          "Set up your timetable",
+          "You haven't added a timetable yet. Go to Settings to paste in your timetable JSON.",
+          [
+            { text: "Later", style: "cancel" },
+            {
+              text: "Go to Settings",
+              onPress: () => {
+                if (navigationRef.isReady()) {
+                  navigationRef.navigate("Settings" as never)
+                }
+              }
+            }
+          ]
+        )
+      })
+      .catch(err => {
+        console.warn("Failed to check timetable import status on startup:", err)
+      })
+
     ensureNotificationPermission()
       .then(async granted => {
         if (!granted) {
@@ -110,7 +141,7 @@ export default function App() {
 
   return (
     <SafeAreaProvider>
-      <NavigationContainer theme={navTheme}>
+      <NavigationContainer ref={navigationRef} theme={navTheme}>
         <StatusBar style="dark" />
         <Tab.Navigator
           tabBarPosition="bottom"
