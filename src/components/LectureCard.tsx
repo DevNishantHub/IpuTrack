@@ -21,9 +21,6 @@ export default function LectureCard({ lecture, onDelete, onEdit }: Props) {
         <Text style={styles.subject}>{lecture.subject}</Text>
         <Text style={styles.meta}>
           {DAY_NAMES[lecture.day]} · {lecture.startTime}
-          {lecture.endTime && lecture.endTime !== lecture.startTime
-            ? ` - ${lecture.endTime}`
-            : ""}
         </Text>
       </TouchableOpacity>
       <View style={styles.actions}>
