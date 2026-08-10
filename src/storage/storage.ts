@@ -16,6 +16,7 @@ const SEMESTER_START_DATE_KEY = "semesterStartDate"
 const ARCHIVED_SEMESTERS_KEY = "archivedSemesters"
 const HOLIDAYS_KEY = "holidays"
 const REMINDER_SETTINGS_KEY = "reminderSettings"
+const REMINDER_SCHEDULE_SIGNATURE_KEY = "reminderScheduleSignature"
 
 export const DEFAULT_ATTENDANCE_THRESHOLD = 75
 
@@ -142,7 +143,8 @@ export const clearAllData = async (): Promise<void> => {
     LOW_ATTENDANCE_NOTIFIED_KEY,
     SUBJECT_THRESHOLDS_KEY,
     HOLIDAYS_KEY,
-    REMINDER_SETTINGS_KEY
+    REMINDER_SETTINGS_KEY,
+    REMINDER_SCHEDULE_SIGNATURE_KEY
   ])
   // Best-effort: scheduled reminders reference lecture ids/text that are
   // about to be gone. cancelAllClassReminders already swallows its own
@@ -352,4 +354,22 @@ export const setReminderSettings = async (settings: ReminderSettings): Promise<v
     throw new Error(`minutesBefore must be between ${MIN_REMINDER_MINUTES} and ${MAX_REMINDER_MINUTES}.`)
   }
   await AsyncStorage.setItem(REMINDER_SETTINGS_KEY, JSON.stringify(settings))
+}
+
+// --- Reminder schedule signature ---
+// A cheap fingerprint of "what we last told the OS to schedule" (the
+// lectures + minutesBefore that were passed to scheduleClassReminders).
+// Cold start re-syncs reminders on every launch to guard against the OS
+// clearing pending notifications or the timetable changing while the app
+// was closed, but re-running the full cancel-then-reschedule loop is
+// pointless work when nothing has actually changed since the last launch.
+// Comparing against this signature lets the caller skip that work on the
+// (common) case where nothing changed, without giving up the "always
+// re-sync" safety net when something did.
+export const getReminderScheduleSignature = async (): Promise<string | null> => {
+  return await AsyncStorage.getItem(REMINDER_SCHEDULE_SIGNATURE_KEY)
+}
+
+export const setReminderScheduleSignature = async (signature: string): Promise<void> => {
+  await AsyncStorage.setItem(REMINDER_SCHEDULE_SIGNATURE_KEY, signature)
 }

@@ -44,7 +44,7 @@ export default function TimetableScreen() {
           <View style={styles.noticeCard}>
             <MaterialIcons name="info-outline" size={18} color={colors.onSurfaceVariant} />
             <Text style={styles.noticeText}>
-              This is a placeholder schedule. Go to Settings to set up your real timetable.
+              You haven't set up a timetable yet. Go to Settings to import your real timetable.
             </Text>
           </View>
         )}

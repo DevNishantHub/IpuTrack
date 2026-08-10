@@ -109,7 +109,16 @@ export const checkLowAttendanceAndNotify = async (
   allAttendance: Attendance[]
 ): Promise<void> => {
   const lecture = allLectures.find(l => l.id === lectureId)
-  if (!lecture) return
+  if (!lecture) {
+    // Attendance exists for a lectureId that isn't in the current master
+    // timetable (e.g. it was removed by a later import after the record
+    // was created). There's no subject to resolve a threshold against, so
+    // the check genuinely can't run for this call - but logging beats a
+    // silent no-op, since this previously gave no signal that a
+    // low-attendance check was skipped rather than simply passing.
+    console.warn(`checkLowAttendanceAndNotify: no lecture found for lectureId "${lectureId}", skipping check`)
+    return
+  }
 
   const subject = lecture.subject
   const lectureIds = allLectures

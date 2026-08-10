@@ -14,13 +14,43 @@ import StatsScreen from "./screens/StatsScreen"
 import SettingsScreen from "./screens/SettingsScreen"
 import { colors, spacing } from "./theme"
 import { ensureNotificationPermission, scheduleClassReminders } from "./utils/notifications"
-import { getReminderSettings, getLectures, isTimetableImported } from "./storage/storage"
+import {
+  getReminderSettings,
+  getLectures,
+  isTimetableImported,
+  getReminderScheduleSignature,
+  setReminderScheduleSignature
+} from "./storage/storage"
 
 const Tab = createMaterialTopTabNavigator()
 
 // Lets the "go to Settings" popup below navigate without needing to be
 // rendered inside the Tab.Navigator itself.
 const navigationRef = createNavigationContainerRef()
+
+// Name of the tab the first-run onboarding nudge below sends the user to.
+// Kept as a single named constant (rather than a string literal repeated at
+// each call site) so the one place that currently cares about "where does
+// onboarding send people" is easy to find if that ever needs to change.
+const ONBOARDING_DESTINATION_TAB = "Settings"
+
+// navigationRef.isReady() can still be false for a brief window after this
+// effect starts (AsyncStorage reads can resolve before NavigationContainer
+// finishes its first mount, especially on a slow cold start) - a plain
+// `if (isReady()) navigate()` can silently no-op right when the user taps
+// the button. Poll briefly instead of navigating immediately so a
+// still-mounting navigator doesn't swallow the tap.
+function navigateWhenReady(name: string, retriesLeft = 20): void {
+  if (navigationRef.isReady()) {
+    navigationRef.navigate(name as never)
+    return
+  }
+  if (retriesLeft <= 0) {
+    console.warn(`navigateWhenReady: navigator never became ready, dropping navigation to "${name}"`)
+    return
+  }
+  setTimeout(() => navigateWhenReady(name, retriesLeft - 1), 50)
+}
 
 const navTheme = {
   ...DefaultTheme,
@@ -99,11 +129,7 @@ export default function App() {
             { text: "Later", style: "cancel" },
             {
               text: "Go to Settings",
-              onPress: () => {
-                if (navigationRef.isReady()) {
-                  navigationRef.navigate("Settings" as never)
-                }
-              }
+              onPress: () => navigateWhenReady(ONBOARDING_DESTINATION_TAB)
             }
           ]
         )
@@ -119,17 +145,34 @@ export default function App() {
           return
         }
 
-        // Re-sync class reminders on every cold start. This is cheap
-        // (local scheduling only) and guards against the OS clearing
-        // pending notifications, or the timetable having changed while
-        // the app was closed - without this, reminders could silently
-        // drift out of sync with the actual schedule.
+        // Re-sync class reminders on every cold start. This guards against
+        // the OS clearing pending notifications, or the timetable having
+        // changed while the app was closed - without this, reminders could
+        // silently drift out of sync with the actual schedule. The actual
+        // cancel+reschedule work is skipped below when nothing relevant has
+        // changed since the last time it ran, so repeated launches in the
+        // same day don't keep re-doing the same OS calls for no reason.
         try {
           const settings = await getReminderSettings()
-          if (settings.enabled) {
-            const lectures = await getLectures()
-            await scheduleClassReminders(lectures, settings.minutesBefore)
-          }
+          if (!settings.enabled) return
+
+          const lectures = await getLectures()
+          const signature = JSON.stringify({
+            minutesBefore: settings.minutesBefore,
+            lectures: lectures.map(l => ({
+              id: l.id,
+              day: l.day,
+              startTime: l.startTime,
+              subject: l.subject,
+              note: l.note
+            }))
+          })
+
+          const lastSignature = await getReminderScheduleSignature()
+          if (lastSignature === signature) return
+
+          await scheduleClassReminders(lectures, settings.minutesBefore)
+          await setReminderScheduleSignature(signature)
         } catch (err) {
           console.warn("Failed to re-sync class reminders on startup:", err)
         }
@@ -155,7 +198,7 @@ export default function App() {
           <Tab.Screen name="Today" component={TodayScreen} />
           <Tab.Screen name="Timetable" component={TimetableScreen} />
           <Tab.Screen name="Stats" component={StatsScreen} />
-          <Tab.Screen name="Settings" component={SettingsScreen} />
+          <Tab.Screen name={ONBOARDING_DESTINATION_TAB} component={SettingsScreen} />
         </Tab.Navigator>
       </NavigationContainer>
     </SafeAreaProvider>
