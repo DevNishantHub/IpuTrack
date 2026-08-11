@@ -15,27 +15,42 @@ export const calculateStats = (attendance: Attendance[]) => {
   return { present, absent, cancelled, percentage }
 }
 
+// `extraLectureIds` are one-off classes for a subject (added from the Today
+// tab or created by CSV import). Their attendance counts toward the subject's
+// percentage and skip/attend math, since the user genuinely attended them -
+// but only master-timetable classes count as "classes remaining": a one-off
+// exists on a single past/future date and can't be skipped ahead of time.
 export const calculateBunkInfo = (
   attendance: Attendance[],
   lectures: Lecture[],
   subject: string,
-  threshold: number
+  threshold: number,
+  extraLectureIds: string[] = []
 ): { canSkip: number; mustAttend: number; currentPct: number } => {
-  const lectureIds = lectures
+  const masterLectureIds = lectures
     .filter(l => l.subject === subject)
     .map(l => l.id)
+  const lectureIds = [...masterLectureIds, ...extraLectureIds]
   const subjectAttendance = attendance.filter(a => lectureIds.includes(a.lectureId))
 
   const { present, absent, percentage: currentPct } = calculateStats(subjectAttendance)
-  const totalClasses = lectureIds.length
-  const attendedClasses = present + absent
+  const totalClasses = masterLectureIds.length
 
   if (totalClasses === 0) {
     return { canSkip: 0, mustAttend: 0, currentPct: 0 }
   }
 
-  // Calculate future classes remaining
-  const futureClasses = totalClasses - attendedClasses
+  // The skip/attend formulas below assume their denominator base is exactly
+  // present + absent - which now includes one-off extras - so the attended
+  // count must match that base, not a master-only count.
+  const attendedClasses = present + absent
+  // Remaining classes are master-timetable only: a one-off extra exists on a
+  // single date and can't be skipped ahead of time, so its attendance must
+  // not inflate the future-class count.
+  const masterAttended = attendance.filter(
+    a => masterLectureIds.includes(a.lectureId) && (a.status === "present" || a.status === "absent")
+  ).length
+  const futureClasses = Math.max(0, totalClasses - masterAttended)
 
   // Formula: (present) / (present + absent + futureSkipped) >= threshold/100
   // present >= (threshold/100) * (present + absent + futureSkipped)
@@ -64,11 +79,13 @@ export const getAttendanceTrend = (
   attendance: Attendance[],
   lectures: Lecture[],
   subject: string,
-  semesterStartDate: string
+  semesterStartDate: string,
+  extraLectureIds: string[] = []
 ): { date: string; percentage: number }[] => {
-  const lectureIds = lectures
-    .filter(l => l.subject === subject)
-    .map(l => l.id)
+  const lectureIds = [
+    ...lectures.filter(l => l.subject === subject).map(l => l.id),
+    ...extraLectureIds
+  ]
   const subjectAttendance = attendance.filter(a => lectureIds.includes(a.lectureId))
 
   // Filter by semester start date

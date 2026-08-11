@@ -130,13 +130,37 @@ describe("validateImportedTimetable - note field", () => {
 })
 
 describe("validateImportedTimetable - id generation & data integrity", () => {
-  it("assigns each lecture a unique id even for identical duplicate entries", () => {
+  it("assigns each lecture a unique id even for identical duplicate entries (collision suffixes)", () => {
     const result = validateImportedTimetable(JSON.stringify([validItem, validItem, validItem]))
     expect(result.ok).toBe(true)
     if (result.ok) {
       const ids = result.lectures.map(l => l.id)
       expect(new Set(ids).size).toBe(3)
+      // Deterministic base id for AI / Monday / 8:30, with suffixes for dupes.
+      expect(ids[0]).toBe("ai-1-8-30")
+      expect(ids[1]).toBe("ai-1-8-30-2")
+      expect(ids[2]).toBe("ai-1-8-30-3")
     }
+  })
+
+  it("generates deterministic classname-based ids (subject-day-time) stable across calls", () => {
+    const input = JSON.stringify([{ subject: "AI Lab 4", day: 5, startTime: "8:30" }])
+    const first = validateImportedTimetable(input)
+    const second = validateImportedTimetable(input)
+    expect(first.ok).toBe(true)
+    expect(second.ok).toBe(true)
+    if (first.ok && second.ok) {
+      expect(first.lectures[0].id).toBe("ai-lab-4-5-8-30")
+      expect(second.lectures[0].id).toBe(first.lectures[0].id)
+    }
+  })
+
+  it("normalizes time variants (8:30 vs 08:30) to the same id", () => {
+    const a = validateImportedTimetable(JSON.stringify([{ subject: "AI", day: 1, startTime: "8:30" }]))
+    const b = validateImportedTimetable(JSON.stringify([{ subject: "AI", day: 1, startTime: "08:30" }]))
+    expect(a.ok).toBe(true)
+    expect(b.ok).toBe(true)
+    if (a.ok && b.ok) expect(a.lectures[0].id).toBe(b.lectures[0].id)
   })
 
   it("preserves array order in the output", () => {

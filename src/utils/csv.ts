@@ -2,26 +2,29 @@
 // Converts attendance records to/from a simple, human-editable CSV format.
 //
 // Columns: date,lectureId,subject,startTime,status
-// - date/startTime/status are authoritative and used to reconstruct records.
-// - lectureId/subject are exported for readability/reference only, and are
-//   NOT read back in on import. Lecture ids are regenerated every time the
-//   master timetable is (re)imported (see timetableImport.ts), so an id
-//   captured in an old export can silently point at nothing by the time you
-//   import it back - which used to make those rows vanish. Instead, each row
-//   is re-matched against the CURRENT timetable by (day-of-week of `date`,
-//   `startTime`), the same grouping the Today screen already uses to decide
-//   which lectures exist on a given date. If no master lecture matches, the
-//   row is matched against one-off extra classes (added on the Today tab)
-//   by exact `date` + `startTime`. `lectureId` in the file is never trusted
-//   for lookup - only the id resolved this way is ever written to storage,
-//   and only used afterward for the normal save/dedupe-by-id path.
+// - date/subject/startTime/status are authoritative on import: each date in
+//   the file is treated as a COMPLETE snapshot of that day, and the file is
+//   the source of truth for which classes happened and how they went.
+// - lectureId is exported for reference only and NEVER read back in on
+//   import. Lecture ids are regenerated every time the master timetable is
+//   (re)imported (see timetableImport.ts), so an id captured in an old
+//   export can silently point at nothing by the time you import it back.
+//   Instead each row is resolved against the CURRENT timetable by subject
+//   (+ day-of-week of `date`): a row attaches to the master class with the
+//   same subject that day (tolerating a trailing lab-room number, so "AI Lab"
+//   attaches to the "AI Lab 4" master class), or becomes a one-off class for
+//   that exact date if no such class exists. `subject` decides, so a row is
+//   never silently attached to a differently-named class.
 //
-// Removed-for-day classes (a DayOverride with cancelled: true) are deleted
-// on purpose and are deliberately NOT carried through either direction:
-// exports skip their attendance rows, and imports skip any row that would
-// re-create them, so they stay gone for good.
+// On import (see storage.applyCsvDayPlans) each date in the file is rebuilt
+// to match it exactly: listed classes are marked with their status, master
+// classes that day which aren't listed are removed for that day, and rows
+// matching no master class are added as one-off classes. Exports already
+// skip classes removed for a day, so export -> import is a faithful
+// round-trip that reproduces each day as it was.
 import { Attendance, AttendanceStatus, DayOverride, ExtraLecture, Lecture } from "../types"
 import { isValidDateString, getDayOfWeek, toMinutes, DAY_TIME_RE } from "./dateHelpers"
+import { slugifyId, timeTokenForId } from "./timetableImport"
 
 const CSV_HEADER = "date,lectureId,subject,startTime,status"
 const VALID_STATUSES: AttendanceStatus[] = ["present", "absent", "cancelled"]
@@ -114,26 +117,79 @@ export const attendanceToCsv = (
   return [CSV_HEADER, ...rows].join("\n")
 }
 
+export type CsvDayPlan = {
+  date: string
+  // Attendance rows resolved for this date (deterministic lectureId-date ids).
+  attendance: Attendance[]
+  // Master lectures the CSV explicitly lists for this date (matched by
+  // subject). Anything else scheduled that day is treated as removed for
+  // the day when the plan is applied.
+  coveredLectureIds: string[]
+  // For covered master lectures the CSV lists at a different time - a
+  // time-move for that day only, written as a day override.
+  timeOverrides: DayOverride[]
+  // One-off classes the CSV defines that match no master lecture - created
+  // for that exact date only (id: subject-date-time).
+  extraLectures: ExtraLecture[]
+}
+
 export type CsvImportResult =
-  | { ok: true; entries: Attendance[]; skippedCount: number; skippedReasons: string[] }
+  | { ok: true; dayPlans: CsvDayPlan[]; entries: Attendance[]; skippedCount: number; skippedReasons: string[] }
   | { ok: false; error: string }
 
-// Parses pasted/edited CSV text back into Attendance records, resolving each
-// row against `lectures` (the CURRENT master timetable) by day-of-week +
-// startTime rather than trusting the file's own lectureId column - see the
-// header comment for why. Rows that match no master lecture fall through to
-// `extraLectures` (one-off classes added on the Today tab) matched by exact
-// date + startTime. Rows for a class that was removed for that day (a
-// cancelled DayOverride in `overrides`) are skipped so a removal isn't
-// undone by re-importing old data. Invalid or unresolvable rows are skipped
-// rather than failing the whole import, since a hand-edited file - or one
-// exported before the timetable last changed - will often have at least one
-// row that no longer lines up.
+// Normalizes a subject for comparison. Besides the usual trim/case and
+// trailing-sentence-punctuation tolerance, a trailing LAB-ROOM number is
+// stripped ("AI Lab 4" -> "AI Lab"), so "AI Lab" and "AI Lab 4" are the
+// same subject - while "AI" (theory) and "AI Lab 4" (lab) stay distinct,
+// and numeric course codes like "Math 101" are never touched.
+export const normalizeSubject = (value: string): string => {
+  const base = value.trim().toLowerCase().replace(/[.,;:]+$/, "")
+  // A trailing lab-room number ("AI Lab 4") is part of the subject's name,
+  // so "AI Lab" and "AI Lab 4" compare equal - but "AI" (theory) stays
+  // distinct, and numeric course codes like "Math 101" are never touched.
+  return /lab\s*\d+$/.test(base) ? base.replace(/\s*\d+$/, "") : base
+}
+
+// Case-insensitive, trimmed subject comparison (same copy-artifact tolerance
+// as the status column) that treats a trailing lab-room number as part of
+// the subject's identity - a CSV row saying "AI Lab" attaches to the
+// "AI Lab 4" master class rather than becoming a duplicate one-off class.
+const subjectsMatch = (a: string, b: string) => normalizeSubject(a) === normalizeSubject(b)
+
+// Builds the subject list for stats: one entry per normalized subject, so
+// names that differ only by case / trailing punctuation / a lab-room number
+// ("AI Lab" and "AI Lab 4") collapse onto a single card. Each entry is
+// labeled with the master timetable's spelling when one exists (falling back
+// to the extra class's spelling), so stats never show the same subject twice.
+export const subjectLabelsByKey = (
+  lectures: Lecture[],
+  extras: ExtraLecture[]
+): Map<string, string> => {
+  const labels = new Map<string, string>()
+  for (const l of lectures) {
+    const key = normalizeSubject(l.subject)
+    if (!labels.has(key)) labels.set(key, l.subject)
+  }
+  for (const e of extras) {
+    const key = normalizeSubject(e.subject)
+    if (!labels.has(key)) labels.set(key, e.subject)
+  }
+  return labels
+}
+
+// Parses pasted/edited CSV text into per-date "day plans". Each date in the
+// file is treated as a complete snapshot of that day - the CSV is the source
+// of truth for which classes happened and how they went. Rows are resolved
+// against `lectures` (the CURRENT master timetable) by SUBJECT first: a row
+// attaches to the master class with the same subject that day (keeping its
+// time, or moving it for that day if the file lists a different time), and a
+// row whose subject matches no master class becomes a one-off class for that
+// exact date. The file's lectureId column is never trusted - ids are
+// resolved from the timetable or generated deterministically. Invalid or
+// unresolvable rows are skipped rather than failing the whole import.
 export const parseAttendanceCsv = (
   csvText: string,
-  lectures: Lecture[] = [],
-  extraLectures: ExtraLecture[] = [],
-  overrides: DayOverride[] = []
+  lectures: Lecture[] = []
 ): CsvImportResult => {
   const lines = csvText
     .split(/\r?\n/)
@@ -157,11 +213,15 @@ export const parseAttendanceCsv = (
     }
   }
 
-  // A class removed for a day (cancelled override) must stay deleted even if
-  // an old export that still contains it is pasted back in.
-  const removedKeys = new Set(
-    overrides.filter(o => o.cancelled).map(o => `${o.lectureId}|${o.date}`)
-  )
+  const plansByDate = new Map<string, CsvDayPlan>()
+  const planFor = (date: string): CsvDayPlan => {
+    let plan = plansByDate.get(date)
+    if (!plan) {
+      plan = { date, attendance: [], coveredLectureIds: [], timeOverrides: [], extraLectures: [] }
+      plansByDate.set(date, plan)
+    }
+    return plan
+  }
 
   const entries: Attendance[] = []
   const skippedReasons: string[] = []
@@ -183,67 +243,88 @@ export const parseAttendanceCsv = (
       skippedReasons.push(`Row ${rowNum}: invalid startTime "${startTime}" (expected H:MM or HH:MM)`)
       continue
     }
-    if (!VALID_STATUSES.includes(statusRaw as AttendanceStatus)) {
+    // Copying CSV out of a chat message, spreadsheet, or email often drags a
+    // sentence period (or similar punctuation) onto the very last field of
+    // the file. Strip trailing sentence punctuation before validating - the
+    // result can never collide with another status ("present." can only be
+    // "present"). The raw value is kept for error messages.
+    const status = statusRaw.replace(/[.,;:]+$/, "")
+    if (!VALID_STATUSES.includes(status as AttendanceStatus)) {
       skippedReasons.push(`Row ${rowNum}: invalid status "${statusRaw}" (expected present/absent/cancelled)`)
       continue
     }
 
-    // Which lectures actually happen on this date, by weekday - the same
-    // grouping TodayScreen uses. Matched further by startTime, since a day
-    // can have several lectures.
+    const plan = planFor(date)
     const weekday = getDayOfWeek(date)
     const startMinutes = toMinutes(startTime)
-    let candidates = lectures.filter(l => l.day === weekday && toMinutes(l.startTime) === startMinutes)
+    const dayLectures = lectures.filter(l => l.day === weekday)
 
-    // Same day+time slot occupied by more than one current lecture (data
-    // oddity, not expected in normal use) - narrow using subject if we have
-    // one to go on.
-    if (candidates.length > 1 && subject) {
-      const bySubject = candidates.filter(l => l.subject.toLowerCase() === subject.toLowerCase())
-      if (bySubject.length > 0) candidates = bySubject
+    const covered = (lectureId: string) => {
+      if (!plan.coveredLectureIds.includes(lectureId)) plan.coveredLectureIds.push(lectureId)
+    }
+    const mark = (lectureId: string) => {
+      const entry = { id: `${lectureId}-${date}`, date, lectureId, status: status as AttendanceStatus }
+      entries.push(entry)
+      plan.attendance.push(entry)
     }
 
-    if (candidates.length === 1) {
-      const lecture = candidates[0]
-      // A class removed for that day must not be resurrected by re-importing
-      // an old export - skip it, matching the removal's own data purge.
-      if (removedKeys.has(`${lecture.id}|${date}`)) {
-        skippedReasons.push(`Row ${rowNum}: ${lecture.subject} was removed for that day (${date}) - skipped`)
+    if (subject) {
+      const bySubject = dayLectures.filter(l => subjectsMatch(l.subject, subject))
+      if (bySubject.length === 0) {
+        // No master class with this subject that day - the CSV defines a
+        // one-off class for this exact date. Deterministic id so re-imports
+        // and Today-screen edits of the same class stay linked.
+        const extraId = `${slugifyId(subject)}-${date}-${timeTokenForId(startTime)}`
+        if (!plan.extraLectures.some(e => e.id === extraId)) {
+          plan.extraLectures.push({ id: extraId, date, subject, startTime })
+        }
+        mark(extraId)
         continue
       }
-      entries.push({
-        id: `csv-${date}-${lecture.id}-${Date.now()}-${i}`,
-        date,
-        lectureId: lecture.id,
-        status: statusRaw as AttendanceStatus
-      })
-      continue
-    }
-    if (candidates.length > 1) {
-      skippedReasons.push(`Row ${rowNum}: ${candidates.length} lectures match ${startTime} that day (${date}) - ambiguous, add/fix the subject column to disambiguate`)
+      if (bySubject.length > 1) {
+        // More than one class with that subject that day - only a time that
+        // pins one of them down is unambiguous.
+        const bySubjectAndTime = bySubject.filter(l => toMinutes(l.startTime) === startMinutes)
+        if (bySubjectAndTime.length !== 1) {
+          skippedReasons.push(`Row ${rowNum}: ${bySubject.length} classes named "${subject}" that day (${date}) - add a time that matches one of them to disambiguate`)
+          continue
+        }
+        covered(bySubjectAndTime[0].id)
+        mark(bySubjectAndTime[0].id)
+        continue
+      }
+      const lecture = bySubject[0]
+      covered(lecture.id)
+      if (toMinutes(lecture.startTime) !== startMinutes) {
+        // Listed at a different time than the timetable - a time-move for
+        // this day only, recorded as a day override.
+        const alreadyMoved = plan.timeOverrides.some(o => o.lectureId === lecture.id)
+        if (!alreadyMoved) {
+          plan.timeOverrides.push({
+            id: `${lecture.id}-${date}`,
+            date,
+            lectureId: lecture.id,
+            subject: lecture.subject,
+            startTime
+          })
+        }
+      }
+      mark(lecture.id)
       continue
     }
 
-    // No master lecture at that time - maybe it's a one-off extra class
-    // added on the Today tab for this exact date.
-    const extraCandidates = extraLectures.filter(
-      e => e.date === date && toMinutes(e.startTime) === startMinutes
-    )
-    if (extraCandidates.length === 1) {
-      entries.push({
-        id: `csv-${date}-${extraCandidates[0].id}-${Date.now()}-${i}`,
-        date,
-        lectureId: extraCandidates[0].id,
-        status: statusRaw as AttendanceStatus
-      })
+    // No subject column/value - fall back to time-only matching.
+    const byTime = dayLectures.filter(l => toMinutes(l.startTime) === startMinutes)
+    if (byTime.length === 1) {
+      covered(byTime[0].id)
+      mark(byTime[0].id)
       continue
     }
-    if (extraCandidates.length > 1) {
-      skippedReasons.push(`Row ${rowNum}: ${extraCandidates.length} added classes match ${startTime} on ${date} - ambiguous`)
+    if (byTime.length > 1) {
+      skippedReasons.push(`Row ${rowNum}: no subject given and ${byTime.length} classes at ${startTime} that day (${date}) - add the subject column to disambiguate`)
       continue
     }
-
-    skippedReasons.push(`Row ${rowNum}: no lecture on your current timetable at ${startTime} that day (${date})`)
+    skippedReasons.push(`Row ${rowNum}: no class at ${startTime} on ${date} in your timetable, and no subject was given to create one`)
   }
 
   if (entries.length === 0) {
@@ -255,5 +336,6 @@ export const parseAttendanceCsv = (
     }
   }
 
-  return { ok: true, entries, skippedCount: skippedReasons.length, skippedReasons }
+  const dayPlans = Array.from(plansByDate.values())
+  return { ok: true, dayPlans, entries, skippedCount: skippedReasons.length, skippedReasons }
 }

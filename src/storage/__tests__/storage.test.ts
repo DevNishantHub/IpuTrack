@@ -16,7 +16,7 @@ import {
   saveBreaks,
   getAttendance,
   saveAttendance,
-  saveAttendanceBulk,
+  applyCsvDayPlans,
   clearAllData,
   getAttendanceThreshold,
   setAttendanceThreshold,
@@ -83,6 +83,42 @@ describe("getLectures / setMasterTimetable / isTimetableImported", () => {
   it("setMasterTimetable with an empty array clears the timetable (not treated as unset)", async () => {
     await setMasterTimetable([])
     expect(await getLectures()).toEqual([])
+  })
+
+  it("remaps attendance/overrides from old lecture ids onto matching new ids when the timetable is re-imported", async () => {
+    await setMasterTimetable([lecture("import-old-1", "AI", 1, "09:00")])
+    await saveAttendance(record("1", "import-old-1", "2026-01-05", "present"))
+    await saveOverride({ id: "o1", date: "2026-01-05", lectureId: "import-old-1", note: "edited" })
+    // Re-import with the deterministic id for the same slot, using a
+    // different time format ("9:00" vs "09:00") to prove normalization.
+    await setMasterTimetable([lecture("ai-1-9-00", "AI", 1, "9:00")])
+    const attendance = await getAttendance()
+    expect(attendance).toHaveLength(1)
+    expect(attendance[0].lectureId).toBe("ai-1-9-00")
+    const overrides = await getOverridesForDate("2026-01-05")
+    expect(overrides[0].lectureId).toBe("ai-1-9-00")
+  })
+
+  it("leaves duplicate-slot identities unmapped rather than guessing which duplicate old data belongs to", async () => {
+    // Two old lectures with the same subject+day+time, and a re-import that
+    // also has two of them - the identity is ambiguous on both sides, so the
+    // remap must not merge both old ids onto one new slot.
+    await setMasterTimetable([
+      lecture("import-old-a", "Math", 1, "09:00"),
+      lecture("import-old-b", "Math", 1, "09:00")
+    ])
+    await saveAttendance(record("1", "import-old-a", "2026-01-05", "present"))
+    await saveAttendance(record("2", "import-old-b", "2026-01-05", "absent"))
+
+    await setMasterTimetable([
+      lecture("import-new-a", "Math", 1, "09:00"),
+      lecture("import-new-b", "Math", 1, "09:00")
+    ])
+
+    const attendance = await getAttendance()
+    expect(attendance).toHaveLength(2)
+    // Untouched: neither old id was collapsed onto a new duplicate slot.
+    expect(attendance.map(a => a.lectureId).sort()).toEqual(["import-old-a", "import-old-b"])
   })
 
   it("falls back to an empty list if stored lectures JSON is corrupted", async () => {
@@ -237,7 +273,16 @@ describe("attendance read/write consistency", () => {
     const all = await getAttendance()
     expect(all).toHaveLength(1)
     expect(all[0].status).toBe("absent")
-    expect(all[0].id).toBe("2")
+    // Ids are deterministic (lectureId-date), not random.
+    expect(all[0].id).toBe("l1-2026-01-01")
+  })
+
+  it("serializes concurrent read-modify-write calls so no writes are lost (rapid parallel taps)", async () => {
+    const writes = Array.from({ length: 15 }, (_, i) =>
+      saveAttendance(record(`id-${i}`, `l${i}`, "2026-01-01", "present"))
+    )
+    await Promise.all(writes)
+    expect(await getAttendance()).toHaveLength(15)
   })
 
   it("saveAttendance keeps records for the same lecture on different dates distinct", async () => {
@@ -262,45 +307,103 @@ describe("attendance read/write consistency", () => {
   })
 })
 
-describe("saveAttendanceBulk", () => {
-  it("no-ops on an empty array without touching storage", async () => {
-    await saveAttendance(record("1", "l1", "2026-01-01", "present"))
-    const before = await AsyncStorage.getItem("attendance")
-    await saveAttendanceBulk([])
-    expect(await AsyncStorage.getItem("attendance")).toBe(before)
-  })
-
-  it("merges bulk entries with existing data, replacing matching lectureId+date keys", async () => {
-    await saveAttendance(record("1", "l1", "2026-01-01", "present"))
-    await saveAttendance(record("2", "l2", "2026-01-01", "present"))
-    await saveAttendanceBulk([
-      record("3", "l1", "2026-01-01", "absent"), // replaces id 1
-      record("4", "l3", "2026-01-02", "present")  // new
+describe("applyCsvDayPlans", () => {
+  it("rebuilds a day from the plan: covered lectures keep attendance, uncovered ones are removed for the day", async () => {
+    await setMasterTimetable([
+      lecture("math-1-9-00", "Math", 1, "09:00"),
+      lecture("physics-1-10-00", "Physics", 1, "10:00")
     ])
-    const all = await getAttendance()
-    expect(all).toHaveLength(3)
-    const byKey = new Map(all.map(a => [`${a.lectureId}|${a.date}`, a]))
-    expect(byKey.get("l1|2026-01-01")?.status).toBe("absent")
-    expect(byKey.get("l2|2026-01-01")?.status).toBe("present")
-    expect(byKey.get("l3|2026-01-02")?.status).toBe("present")
-  })
-
-  it("does NOT de-dupe duplicate keys within a single incoming batch (caller's responsibility) - documents current behavior", async () => {
-    // incomingKeys is only used to filter EXISTING data; entries are spread
-    // in as-is, so two rows sharing lectureId+date in one bulk call both
-    // land in storage. This is a data-consistency gap worth knowing about
-    // when feeding bulk-imported (e.g. CSV) data straight into this function.
-    await saveAttendanceBulk([
-      record("a", "l1", "2026-01-01", "present"),
-      record("b", "l1", "2026-01-01", "absent")
-    ])
-    const all = await getAttendance()
-    expect(all).toHaveLength(2)
-  })
-
-  it("bulk import into an empty store behaves like a plain write", async () => {
-    await saveAttendanceBulk([record("1", "l1", "2026-01-01", "present")])
+    // 2026-01-05 is a Monday (day 1). The plan covers only Math.
+    await applyCsvDayPlans([{
+      date: "2026-01-05",
+      attendance: [{ id: "math-1-9-00-2026-01-05", lectureId: "math-1-9-00", date: "2026-01-05", status: "present" }],
+      coveredLectureIds: ["math-1-9-00"],
+      timeOverrides: [],
+      extraLectures: []
+    }])
+    const overrides = await getOverridesForDate("2026-01-05")
+    expect(overrides).toEqual([{
+      id: "physics-1-10-00-2026-01-05",
+      date: "2026-01-05",
+      lectureId: "physics-1-10-00",
+      cancelled: true
+    }])
     expect(await getAttendance()).toHaveLength(1)
+  })
+
+  it("creates CSV-defined one-off classes and wipes the day's old attendance/extras/overrides", async () => {
+    await setMasterTimetable([lecture("math-1-9-00", "Math", 1, "09:00")])
+    // Pre-existing data for the planned date: attendance, an extra, an override.
+    await saveAttendance(record("1", "math-1-9-00", "2026-01-05", "present"))
+    await saveExtraLecture(extra("x1", "2026-01-05", "Old Seminar"))
+    await saveOverride({ id: "o1", date: "2026-01-05", lectureId: "math-1-9-00", note: "edited" })
+
+    await applyCsvDayPlans([{
+      date: "2026-01-05",
+      attendance: [{ id: "ai-2026-01-05-8-30-2026-01-05", lectureId: "ai-2026-01-05-8-30", date: "2026-01-05", status: "present" }],
+      coveredLectureIds: [],
+      timeOverrides: [],
+      extraLectures: [{ id: "ai-2026-01-05-8-30", date: "2026-01-05", subject: "AI", startTime: "8:30" }]
+    }])
+
+    // Math is now uncovered -> removed for the day; the old override is gone.
+    const overrides = await getOverridesForDate("2026-01-05")
+    expect(overrides).toHaveLength(1)
+    expect(overrides[0]).toMatchObject({ lectureId: "math-1-9-00", cancelled: true })
+    // Old extra replaced by the CSV's one-off class.
+    expect(await getExtraLecturesForDate("2026-01-05")).toEqual([{
+      id: "ai-2026-01-05-8-30", date: "2026-01-05", subject: "AI", startTime: "8:30"
+    }])
+    // Attendance replaced wholesale.
+    const all = await getAttendance()
+    expect(all).toHaveLength(1)
+    expect(all[0].lectureId).toBe("ai-2026-01-05-8-30")
+    expect(all[0].status).toBe("present")
+  })
+
+  it("writes time-move overrides for covered lectures listed at a different time", async () => {
+    await setMasterTimetable([lecture("math-1-9-00", "Math", 1, "09:00")])
+    await applyCsvDayPlans([{
+      date: "2026-01-05",
+      attendance: [{ id: "math-1-9-00-2026-01-05", lectureId: "math-1-9-00", date: "2026-01-05", status: "absent" }],
+      coveredLectureIds: ["math-1-9-00"],
+      timeOverrides: [{
+        id: "math-1-9-00-2026-01-05",
+        date: "2026-01-05",
+        lectureId: "math-1-9-00",
+        subject: "Math",
+        startTime: "10:30"
+      }],
+      extraLectures: []
+    }])
+    const overrides = await getOverridesForDate("2026-01-05")
+    expect(overrides).toHaveLength(1)
+    expect(overrides[0]).toMatchObject({ lectureId: "math-1-9-00", startTime: "10:30" })
+    expect(overrides[0].cancelled).toBeUndefined()
+  })
+
+  it("restores a previously-removed class when the plan covers it, and leaves other dates untouched", async () => {
+    await setMasterTimetable([lecture("math-1-9-00", "Math", 1, "09:00")])
+    await saveOverride({ id: "o1", date: "2026-01-05", lectureId: "math-1-9-00", cancelled: true })
+    await saveAttendance(record("1", "math-1-9-00", "2026-01-12", "present")) // another Monday, must survive
+
+    await applyCsvDayPlans([{
+      date: "2026-01-05",
+      attendance: [{ id: "math-1-9-00-2026-01-05", lectureId: "math-1-9-00", date: "2026-01-05", status: "present" }],
+      coveredLectureIds: ["math-1-9-00"],
+      timeOverrides: [],
+      extraLectures: []
+    }])
+
+    expect(await getOverridesForDate("2026-01-05")).toEqual([])
+    expect(await getAttendance()).toHaveLength(2)
+  })
+
+  it("no-ops on an empty plan list without touching storage", async () => {
+    await saveAttendance(record("1", "l1", "2026-01-05", "present"))
+    const before = await AsyncStorage.getItem("attendance")
+    await applyCsvDayPlans([])
+    expect(await AsyncStorage.getItem("attendance")).toBe(before)
   })
 })
 
@@ -570,7 +673,7 @@ describe("cross-key data consistency", () => {
     await clearAllData()
     await saveAttendance(record("2", "l2", "2026-02-01", "absent"))
     const all = await getAttendance()
-    expect(all).toEqual([record("2", "l2", "2026-02-01", "absent")])
+    expect(all).toEqual([record("l2-2026-02-01", "l2", "2026-02-01", "absent")])
     expect(await getAttendanceThreshold()).toBe(DEFAULT_ATTENDANCE_THRESHOLD)
   })
 

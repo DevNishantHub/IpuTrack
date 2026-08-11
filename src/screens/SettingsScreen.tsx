@@ -16,7 +16,7 @@ import {
   getLectures,
   getAllOverrides,
   getExtraLectures,
-  saveAttendanceBulk,
+  applyCsvDayPlans,
   getSemesterStartDate,
   setSemesterStartDate as saveSemesterStartDate,
   archiveCurrentSemester,
@@ -241,27 +241,32 @@ export default function SettingsScreen() {
   }
 
   const importAttendanceCsv = async () => {
-    const [lectures, extraLectures, overrides] = await Promise.all([
-      getLectures(),
-      getExtraLectures(),
-      getAllOverrides()
-    ])
-    // extraLectures lets one-off added classes match by date+startTime;
-    // overrides make rows for classes removed on a day get skipped, so a
-    // removal isn't undone by re-importing old data.
-    const result = parseAttendanceCsv(csvInput, lectures, extraLectures, overrides)
+    const lectures = await getLectures()
+    const result = parseAttendanceCsv(csvInput, lectures)
     if (!result.ok) {
       setCsvError(result.error)
       return
     }
     setImporting(true)
     try {
-      await saveAttendanceBulk(result.entries)
+      // The CSV is the source of truth for every date it contains: that
+      // day is rebuilt to match the file. Covered master classes get their
+      // status, timetable classes not listed are removed for that day, and
+      // rows matching no master class become one-off classes for that date.
+      await applyCsvDayPlans(result.dayPlans)
       setShowCsvImport(false)
       setCsvInput("")
       setCsvError(null)
-      const skippedNote = result.skippedCount > 0 ? ` ${result.skippedCount} row(s) were skipped (no matching lecture/bad date/status).` : ""
-      Alert.alert("Import complete", `${result.entries.length} record(s) saved.${skippedNote}`)
+      const skippedNote = result.skippedCount > 0
+        ? ` ${result.skippedCount} row(s) were skipped:\n${result.skippedReasons.slice(0, 3).join("\n")}${result.skippedCount > 3 ? "\n(and more)" : ""}`
+        : ""
+      // Duplicate lecture+date rows within the file are collapsed on save, so
+      // report the count that actually lands in storage.
+      const savedCount = new Set(result.entries.map(e => `${e.lectureId}|${e.date}`)).size
+      Alert.alert(
+        "Import complete",
+        `${result.dayPlans.length} day(s) rebuilt from the CSV with ${savedCount} attendance record(s).${skippedNote}`
+      )
     } catch (err) {
       console.warn("Failed to import attendance CSV:", err)
       Alert.alert("Couldn't import", "Something went wrong saving these records. Please try again.")
@@ -653,11 +658,12 @@ export default function SettingsScreen() {
             <MaterialIcons name="upload-file" size={20} color={colors.onSurfaceVariant} />
             <Text style={styles.cardTitle}>Import attendance</Text>
           </View>
-          <Text style={styles.cardBody}>
-            Paste edited or backed-up CSV data back in. Rows are matched to your current
-            timetable by date + startTime (not the lectureId column) - only date, startTime,
-            and status need to be right. Existing records for the matched lecture and date
-            are overwritten. Classes you removed on a day are skipped so they stay deleted.
+          <Text style={styles.cardBody}>            Paste edited or backed-up CSV data back in. The CSV is the source of truth for
+            each date it contains: that day is rebuilt to match the file. Classes listed in the
+            file are marked with their status (added as one-off classes for that day if they're
+            not in your timetable), and classes in your timetable that day but missing from the
+            file are removed for that day. Dates not in the file are untouched, and a date whose
+            rows were all skipped is left alone too.
           </Text>
 
           {!showCsvImport && (

@@ -21,6 +21,26 @@ Field rules:
 
 Reply with ONLY the JSON array. Nothing else.`
 
+// Normalizes a freeform label (subject, ...) into a safe, lowercase id token:
+// only a-z0-9 and dashes. Used to build deterministic ids that stay identical
+// across timetable re-imports, so attendance/overrides keyed to a lecture are
+// NOT orphaned every time the timetable is (re)imported.
+export const slugifyId = (value: string): string => {
+  const slug = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+  return slug || "class"
+}
+
+// "8:30" and "08:30" both -> "8-30" (unpadded hour, zero-padded minute), so
+// a time the AI types slightly differently still produces the same id.
+export const timeTokenForId = (startTime: string): string => {
+  const [h, m] = startTime.split(":").map(Number)
+  return `${h}-${String(m).padStart(2, "0")}`
+}
+
 export type ImportValidationResult =
   | { ok: true; lectures: Lecture[] }
   | { ok: false; error: string }
@@ -49,6 +69,7 @@ export const validateImportedTimetable = (rawText: string): ImportValidationResu
   }
 
   const lectures: Lecture[] = []
+  const usedIds = new Set<string>()
   for (let i = 0; i < parsed.length; i++) {
     const item = parsed[i] as Record<string, unknown>
     const pos = `Item ${i + 1}`
@@ -72,8 +93,21 @@ export const validateImportedTimetable = (rawText: string): ImportValidationResu
       return { ok: false, error: `${pos} ("${item.subject}") has a "note" that isn't text.` }
     }
 
+    // Deterministic id derived from the class's identity (subject-day-time)
+    // instead of a random string - the same slot imports to the same id, so
+    // re-importing a timetable doesn't orphan its attendance. Collisions (e.g.
+    // duplicate slots in the AI output) get a numeric suffix to stay unique.
+    const baseId = `${slugifyId(item.subject)}-${item.day}-${timeTokenForId(item.startTime)}`
+    let id = baseId
+    let suffix = 2
+    while (usedIds.has(id)) {
+      id = `${baseId}-${suffix}`
+      suffix++
+    }
+    usedIds.add(id)
+
     lectures.push({
-      id: `import-${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${i}`,
+      id,
       subject: item.subject.trim(),
       day: item.day,
       startTime: item.startTime,

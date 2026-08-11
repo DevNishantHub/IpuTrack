@@ -173,6 +173,103 @@ describe("getAttendanceTrend - additional edge cases", () => {
   })
 })
 
+describe("calculateBunkInfo - one-off extra classes", () => {
+  const lectures = [
+    lecture("l1", "Math"), lecture("l2", "Math"), lecture("l3", "Math"), lecture("l4", "Math")
+  ]
+
+  it("counts extra-class attendance toward the percentage and skip/attend math (canSkip stays correct)", () => {
+    // 1 master present + 2 extra presents, 1 master absent -> 75%
+    const attendance = [
+      record("1", "l1", "2026-01-01", "present"),
+      record("2", "l2", "2026-01-02", "absent"),
+      record("3", "math-2026-01-03-10-00", "2026-01-03", "present"),
+      record("4", "math-2026-01-04-10-00", "2026-01-04", "present")
+    ]
+    const result = calculateBunkInfo(attendance, lectures, "Math", 75, [
+      "math-2026-01-03-10-00",
+      "math-2026-01-04-10-00"
+    ])
+    expect(result.currentPct).toBe(75)
+    // 3 present / 4 attended = 75% exactly: skipping even one class drops to
+    // 3/5 = 60%, so canSkip must be 0 even though future master classes remain.
+    expect(result.canSkip).toBe(0)
+    // At threshold with master future classes remaining -> mustAttend 0
+    expect(result.mustAttend).toBe(0)
+  })
+
+  it("extra absents also count toward mustAttend (not just master absents)", () => {
+    // Master: 1 present + 1 absent. Extras: 1 present + 1 absent -> 50% overall.
+    const attendance = [
+      record("1", "l1", "2026-01-01", "present"),
+      record("2", "l2", "2026-01-02", "absent"),
+      record("3", "math-2026-01-03-10-00", "2026-01-03", "present"),
+      record("4", "math-2026-01-04-10-00", "2026-01-04", "absent")
+    ]
+    const result = calculateBunkInfo(attendance, lectures, "Math", 75, [
+      "math-2026-01-03-10-00",
+      "math-2026-01-04-10-00"
+    ])
+    expect(result.currentPct).toBe(50)
+    // 2 master classes remain: attend both to reach 4/6 = 66.7% (best possible),
+    // so mustAttend must reflect the extra absent, not just the master one.
+    expect(result.mustAttend).toBe(2)
+  })
+
+  it("extras never inflate the remaining-future-classes count", () => {
+    // All 4 master classes attended + 1 extra: there are no master classes
+    // left to skip, so canSkip must stay 0 even though present-heavy extras
+    // would otherwise suggest room to skip.
+    const attendance = [
+      record("1", "l1", "2026-01-01", "present"),
+      record("2", "l2", "2026-01-02", "present"),
+      record("3", "l3", "2026-01-03", "present"),
+      record("4", "l4", "2026-01-04", "present"),
+      record("5", "math-2026-01-05-10-00", "2026-01-05", "present")
+    ]
+    const result = calculateBunkInfo(attendance, lectures, "Math", 75, ["math-2026-01-05-10-00"])
+    expect(result.canSkip).toBe(0)
+  })
+
+  it("extra-only subject (no master lectures) has no future classes to plan around", () => {
+    const attendance = [
+      record("1", "ai-2026-01-06-8-30", "2026-01-06", "present"),
+      record("2", "ai-2026-01-07-8-30", "2026-01-07", "absent")
+    ]
+    const result = calculateBunkInfo(attendance, [], "AI", 75, ["ai-2026-01-06-8-30", "ai-2026-01-07-8-30"])
+    // No master classes -> nothing to skip or attend; the screen shows the
+    // extras' percentage from calculateStats instead (bunk's currentPct is
+    // only meaningful when master classes exist).
+    expect(result.canSkip).toBe(0)
+    expect(result.mustAttend).toBe(0)
+  })
+})
+
+describe("getAttendanceTrend - one-off extra classes", () => {
+  const lectures = [lecture("l1", "Math"), lecture("l2", "Math")]
+
+  it("includes extra-class attendance in the cumulative percentage", () => {
+    const attendance = [
+      record("1", "l1", "2026-01-01", "present"),
+      record("2", "math-2026-01-02-10-00", "2026-01-02", "absent")
+    ]
+    const trend = getAttendanceTrend(attendance, lectures, "Math", "2026-01-01", ["math-2026-01-02-10-00"])
+    expect(trend).toHaveLength(2)
+    expect(trend[0].percentage).toBe(100)
+    expect(trend[1].percentage).toBe(50)
+  })
+
+  it("without extra ids, extra-class attendance stays excluded (backward compatible)", () => {
+    const attendance = [
+      record("1", "l1", "2026-01-01", "present"),
+      record("2", "math-2026-01-02-10-00", "2026-01-02", "absent")
+    ]
+    const trend = getAttendanceTrend(attendance, lectures, "Math", "2026-01-01")
+    expect(trend).toHaveLength(1)
+    expect(trend[0].percentage).toBe(100)
+  })
+})
+
 describe("checkLowAttendanceAndNotify - storage & notification integration", () => {
   it("does nothing when the lecture id doesn't exist", async () => {
     const spy = jest.spyOn(Notifications, "scheduleNotificationAsync")

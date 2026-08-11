@@ -31,6 +31,7 @@ import {
   formatDisplayDate
 } from "../utils/dateHelpers"
 import { checkLowAttendanceAndNotify } from "../utils/attendance"
+import { slugifyId, timeTokenForId } from "../utils/timetableImport"
 import { CLASS_SUBJECTS, LAB_SUBJECTS } from "../data/subjects"
 
 const STATUS_META: Record<AttendanceStatus, { label: string; color: string; bg: string; icon: keyof typeof MaterialIcons.glyphMap }> = {
@@ -82,7 +83,9 @@ export default function TodayScreen() {
   // a past day, since that override's date is before the real today. That
   // made editing a previous day look like it silently failed.
   useEffect(() => {
-    pruneExpiredOverrides(getTodayDate())
+    // Fire-and-forget: the override prune is best-effort cleanup, so a
+    // storage failure here must not surface as an unhandled rejection.
+    pruneExpiredOverrides(getTodayDate()).catch(() => {})
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -180,12 +183,11 @@ export default function TodayScreen() {
 
   const mark = async (lectureId: string, status: AttendanceStatus) => {
     // Always keyed by the master lectureId + the viewed date, so backfilling
-    // a past day writes attendance against that day, not today.
-    // Date.now() alone can collide if two marks land in the same
-    // millisecond (rapid taps); the random suffix makes IDs unique
-    // regardless of timing.
+    // a past day writes attendance against that day, not today. The record
+    // id is the deterministic lectureId-date pair (the same key the storage
+    // layer upserts on), so the same class+day always has the same id.
     await saveAttendance({
-      id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      id: `${lectureId}-${selectedDate}`,
       lectureId,
       date: selectedDate,
       status
@@ -319,10 +321,14 @@ export default function TodayScreen() {
   const saveAdd = async () => {
     const time = addTime.trim()
     if (!/^\d{1,2}:\d{2}$/.test(time)) return
+    // Deterministic classname-date id (subject-date-time), same scheme as
+    // timetable lectures - and adding the exact same class twice simply
+    // upserts instead of creating a duplicate.
+    const subject = addSubject.trim() || ALL_SUBJECTS[0]
     await saveExtraLecture({
-      id: `extra-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      id: `${slugifyId(subject)}-${selectedDate}-${timeTokenForId(time)}`,
       date: selectedDate,
-      subject: addSubject.trim() || ALL_SUBJECTS[0],
+      subject,
       startTime: time,
       note: addNote.trim() || undefined
     })

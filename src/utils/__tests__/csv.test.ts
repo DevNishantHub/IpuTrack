@@ -1,5 +1,5 @@
-import { attendanceToCsv, parseAttendanceCsv } from "../csv"
-import { Attendance, Lecture } from "../../types"
+import { attendanceToCsv, parseAttendanceCsv, normalizeSubject, subjectLabelsByKey } from "../csv"
+import { Attendance, ExtraLecture, Lecture } from "../../types"
 
 const lectures: Lecture[] = [
   { id: "l1", subject: "Math", day: 1, startTime: "09:00" },
@@ -134,5 +134,87 @@ describe("parseAttendanceCsv", () => {
       expect(result.entries[0].status).toBe("present")
       expect(result.entries[0].lectureId).toBe("l1")
     }
+  })
+
+  it("attaches a row whose subject omits the lab-room number to the matching master class", () => {
+    // Master has "AI Lab 4" on Monday 09:00; the CSV says "AI Lab" - the
+    // same lab subject, so the row must attach to the master lecture instead
+    // of becoming a duplicate one-off class. 2026-01-05 is a Monday.
+    const labLectures: Lecture[] = [{ id: "lab1", subject: "AI Lab 4", day: 1, startTime: "09:00" }]
+    const csv = "date,lectureId,subject,startTime,status\n2026-01-05,ignored,AI Lab,09:00,present"
+    const result = parseAttendanceCsv(csv, labLectures)
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.entries).toHaveLength(1)
+      expect(result.entries[0].lectureId).toBe("lab1")
+      expect(result.dayPlans[0].extraLectures).toHaveLength(0)
+      expect(result.dayPlans[0].coveredLectureIds).toEqual(["lab1"])
+      expect(result.skippedCount).toBe(0)
+    }
+  })
+
+  it("does NOT merge a theory subject with a lab of the same name", () => {
+    // "AI" (theory) and "AI Lab 4" (lab) are different classes: a row for
+    // "AI" must not attach to the lab - it becomes a one-off class instead.
+    const labLectures: Lecture[] = [{ id: "lab1", subject: "AI Lab 4", day: 1, startTime: "09:00" }]
+    const csv = "date,lectureId,subject,startTime,status\n2026-01-05,ignored,AI,09:00,present"
+    const result = parseAttendanceCsv(csv, labLectures)
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.entries[0].lectureId).toBe("ai-2026-01-05-9-00")
+      expect(result.dayPlans[0].extraLectures).toHaveLength(1)
+    }
+  })
+})
+
+describe("normalizeSubject", () => {
+  it("treats a trailing lab-room number as part of the name", () => {
+    expect(normalizeSubject("AI Lab 4")).toBe("ai lab")
+    expect(normalizeSubject("AI Lab")).toBe("ai lab")
+    expect(normalizeSubject("NLP Lab 4")).toBe("nlp lab")
+  })
+
+  it("still applies trim/case/trailing-punctuation tolerance", () => {
+    expect(normalizeSubject(" AI Lab 4. ")).toBe("ai lab")
+    expect(normalizeSubject("AI")).toBe("ai")
+    expect(normalizeSubject("IMED")).toBe("imed")
+  })
+
+  it("never strips numeric course codes - only lab-room numbers", () => {
+    expect(normalizeSubject("Math 101")).toBe("math 101")
+    expect(normalizeSubject("Math")).toBe("math")
+    expect(normalizeSubject("OS 2")).toBe("os 2")
+  })
+})
+
+describe("subjectLabelsByKey", () => {
+  const labLecture = (): Lecture => ({ id: "lab1", subject: "AI Lab 4", day: 1, startTime: "09:00" })
+  const extra = (id: string, subject: string): ExtraLecture => ({
+    id,
+    date: "2026-01-05",
+    subject,
+    startTime: "10:00"
+  })
+
+  it("collapses name variants onto one label, preferring the master spelling", () => {
+    const labels = subjectLabelsByKey([labLecture()], [extra("e1", "AI Lab")])
+    expect(labels.size).toBe(1)
+    expect(labels.get("ai lab")).toBe("AI Lab 4")
+  })
+
+  it("keeps theory and lab subjects as separate cards", () => {
+    const labels = subjectLabelsByKey(
+      [{ id: "l1", subject: "AI", day: 1, startTime: "09:00" }],
+      [extra("e1", "AI Lab 4")]
+    )
+    expect(labels.size).toBe(2)
+    expect(labels.get("ai")).toBe("AI")
+    expect(labels.get("ai lab")).toBe("AI Lab 4")
+  })
+
+  it("uses the extra's spelling when a subject exists only as a one-off class", () => {
+    const labels = subjectLabelsByKey([], [extra("e1", "AI Lab")])
+    expect(labels.size).toBe(1)
+    expect(labels.get("ai lab")).toBe("AI Lab")
   })
 })

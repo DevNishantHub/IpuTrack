@@ -3,9 +3,10 @@ import { useCallback, useState } from "react"
 import { View, Text, StyleSheet, ScrollView, Alert } from "react-native"
 import { SafeAreaView } from "react-native-safe-area-context"
 import { useFocusEffect } from "@react-navigation/native"
-import { getAttendance, getLectures, clearAllData, getAttendanceThreshold, getEffectiveThresholds, getSemesterStartDate, archiveCurrentSemester } from "../storage/storage"
+import { getAttendance, getLectures, getExtraLectures, clearAllData, getAttendanceThreshold, getEffectiveThresholds, getSemesterStartDate, archiveCurrentSemester } from "../storage/storage"
 import { calculateStats, calculateBunkInfo, getAttendanceTrend } from "../utils/attendance"
-import { Attendance, Lecture } from "../types"
+import { normalizeSubject, subjectLabelsByKey } from "../utils/csv"
+import { Attendance, Lecture, ExtraLecture } from "../types"
 import { colors, elevation, radius, type as typo, spacing } from "../theme"
 import MdButton from "../components/MdButton"
 import AttendanceChart from "../components/AttendanceChart"
@@ -47,14 +48,16 @@ export default function StatsScreen() {
   )
 
   const load = async () => {
-    const [attendance, lectures, globalThreshold, semStart]: [
+    const [attendance, lectures, extras, globalThreshold, semStart]: [
       Attendance[],
       Lecture[],
+      ExtraLecture[],
       number,
       string | null
     ] = await Promise.all([
       getAttendance(),
       getLectures(),
+      getExtraLectures(),
       getAttendanceThreshold(),
       getSemesterStartDate()
     ])
@@ -62,20 +65,47 @@ export default function StatsScreen() {
     setThreshold(globalThreshold)
     setSemesterStartDate(semStart ?? getTodayDate())
 
-    // Filter attendance by semester start date for current stats
-    const currentAttendance = attendance.filter(a => a.date >= (semStart ?? getTodayDate()))
+    // Filter attendance by semester start date for current stats. When no
+    // semester start has ever been set, include everything - otherwise
+    // backfilled days before "today" would be silently hidden from stats.
+    const currentAttendance = semStart
+      ? attendance.filter(a => a.date >= semStart)
+      : attendance
 
     setOverall(calculateStats(currentAttendance))
 
-    const subjects = Array.from(new Set(lectures.map(l => l.subject))).sort()
-    const effectiveThresholds = await getEffectiveThresholds(subjects)
-    const perSubject = subjects.map(subject => {
-      const lectureIds = lectures.filter(l => l.subject === subject).map(l => l.id)
-      const subjectAttendance = currentAttendance.filter(a => lectureIds.includes(a.lectureId))
+    // Subjects come from BOTH the master timetable and one-off extra
+    // classes (added from the Today tab or created by CSV import) - a
+    // subject that only exists as an extra is still a subject with
+    // attendance history. Names that differ only by case / trailing
+    // punctuation / a lab-room number ("AI Lab" vs the timetable's
+    // "AI Lab 4") collapse onto ONE card, labeled with the master
+    // timetable's spelling when one exists.
+    const labelsByKey = subjectLabelsByKey(lectures, extras)
+    const subjects = Array.from(labelsByKey.keys()).sort((a, b) =>
+      labelsByKey.get(a)!.localeCompare(labelsByKey.get(b)!)
+    )
+    const effectiveThresholds = await getEffectiveThresholds(
+      Array.from(labelsByKey.values())
+    )
+    const perSubject = subjects.map(key => {
+      const displayName = labelsByKey.get(key)!
+      // Resolve the subject's classes across both id spaces - master
+      // timetable ids and one-off extra ids (e.g. "ai-2026-01-06-8-30") -
+      // matched by normalized subject so variants count toward the same card.
+      const lectureIds = lectures.filter(l => normalizeSubject(l.subject) === key).map(l => l.id)
+      const extraIds = extras.filter(e => normalizeSubject(e.subject) === key).map(e => e.id)
+      const subjectAttendance = currentAttendance.filter(
+        a => lectureIds.includes(a.lectureId) || extraIds.includes(a.lectureId)
+      )
       const stats = calculateStats(subjectAttendance)
-      const effectiveThreshold = effectiveThresholds[subject]
-      const bunk = calculateBunkInfo(currentAttendance, lectures, subject, effectiveThreshold)
-      return { subject, ...stats, ...bunk, threshold: effectiveThreshold }
+      const effectiveThreshold = effectiveThresholds[displayName]
+      // Bunk planning counts future classes by the master timetable's exact
+      // spelling (the label above) - correct when the timetable uses one
+      // spelling per subject, which is the normal case; variants only ever
+      // come from one-off extras, whose ids are passed separately.
+      const bunk = calculateBunkInfo(currentAttendance, lectures, displayName, effectiveThreshold, extraIds)
+      return { subject: displayName, ...stats, ...bunk, threshold: effectiveThreshold }
     })
     setBySubject(perSubject)
   }
@@ -95,12 +125,18 @@ export default function StatsScreen() {
   const ringColor = barColor(overall.percentage)
 
   const getTrendData = async (subject: string) => {
-    const [attendance, lectures, semStart] = await Promise.all([
+    const [attendance, lectures, extras, semStart] = await Promise.all([
       getAttendance(),
       getLectures(),
+      getExtraLectures(),
       getSemesterStartDate()
     ])
-    return getAttendanceTrend(attendance, lectures, subject, semStart ?? getTodayDate())
+    // Match extras by normalized subject too, so a variant name like
+    // "AI Lab" feeds the "AI Lab 4" card's trend.
+    const key = normalizeSubject(subject)
+    const extraIds = extras.filter(e => normalizeSubject(e.subject) === key).map(e => e.id)
+    // Empty semester start = include all attendance (same rule as load()).
+    return getAttendanceTrend(attendance, lectures, subject, semStart ?? "", extraIds)
   }
 
   const handleTrendPress = async (subject: string) => {

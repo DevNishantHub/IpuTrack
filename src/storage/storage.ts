@@ -1,7 +1,9 @@
 // src/storage/storage.ts
 import AsyncStorage from "@react-native-async-storage/async-storage"
 import { Attendance, Lecture, Break, DayOverride, ArchivedSemester, Holiday, ExtraLecture } from "../types"
-import { getTodayDate, isValidDateString } from "../utils/dateHelpers"
+import { getTodayDate, isValidDateString, getDayOfWeek } from "../utils/dateHelpers"
+import { slugifyId, timeTokenForId } from "../utils/timetableImport"
+import { CsvDayPlan } from "../utils/csv"
 import { cancelAllClassReminders } from "../utils/notifications"
 
 const LECTURES_KEY = "lectures"
@@ -33,6 +35,28 @@ function safeJsonParse<T>(raw: string, fallback: T): T {
   }
 }
 
+// Serializes every read-modify-write storage mutation through a single
+// promise chain. AsyncStorage has no transactions: an op reads, modifies,
+// and writes, and two ops that interleave can each write from a stale read,
+// silently clobbering the other's change (e.g. rapid taps marking two
+// different classes in the same tick). Chaining the writes makes each one
+// atomic relative to the others. Reads are unaffected (they always see the
+// latest committed value).
+let writeChain: Promise<unknown> = Promise.resolve()
+const withWriteLock = <T>(op: () => Promise<T>): Promise<T> => {
+  const result = writeChain.then(op, op)
+  writeChain = result.then(
+    () => undefined,
+    () => undefined
+  )
+  return result
+}
+
+// Last-wins dedupe by a key function, preserving the position of the last
+// occurrence of each key.
+const dedupeByKey = <T>(items: T[], key: (item: T) => string): T[] =>
+  Array.from(new Map(items.map(item => [key(item), item])).values())
+
 // No placeholder/seed data: until the user imports their own timetable via
 // Settings, this returns an empty list rather than pre-filling a sample
 // schedule. isTimetableImported()/getLectures().length can both be used to
@@ -53,9 +77,61 @@ export const isTimetableImported = async (): Promise<boolean> => {
 // Replaces the ENTIRE master timetable and marks it as imported/locked.
 // This is the only intended way to change the master timetable after setup -
 // there is no in-app per-lecture editing of the master table by design.
+//
+// Attendance/overrides written under the PREVIOUS timetable reference the
+// old lecture ids, so before replacing we remap those ids onto the new ones
+// by matching each lecture's stable identity (subject + day + startTime).
+// Together with deterministic ids (see timetableImport.ts) this means a
+// re-import no longer orphans existing attendance - only slots that really
+// changed (renamed/moved/removed) are left unmapped.
 export const setMasterTimetable = async (lectures: Lecture[]): Promise<void> => {
-  await AsyncStorage.setItem(LECTURES_KEY, JSON.stringify(lectures))
-  await AsyncStorage.setItem(TIMETABLE_IMPORTED_KEY, "true")
+  await withWriteLock(async () => {
+    const [oldLectures, attendance, overrides] = await Promise.all([
+      getLectures(),
+      getAttendance(),
+      getAllOverrides()
+    ])
+
+    // Match old lectures to new ones by their stable identity, computed
+    // with the SAME normalization the import uses (slugified subject + day +
+    // normalized time), so "9:00" vs "09:00" are the same slot and a
+    // re-import doesn't orphan existing attendance. Slots that genuinely
+    // changed (renamed/moved/removed) simply stay unmapped.
+    const deterministicIdFor = (l: { subject: string; day: number; startTime: string }) =>
+      `${slugifyId(l.subject)}-${l.day}-${timeTokenForId(l.startTime)}`
+    const oldIdByDeterministicId = new Map(
+      oldLectures.map(l => [deterministicIdFor(l), l.id])
+    )
+    // A duplicated slot (same subject+day+time twice in one timetable) makes
+    // that identity ambiguous, so leave it unmapped rather than guessing
+    // which duplicate the old attendance belongs to - they can't be told
+    // apart. (An ambiguous identity in the OLD timetable is likewise only
+    // ever resolved to the last duplicate's id; the rest stay unmapped.)
+    const newIdentityCounts = new Map<string, number>()
+    for (const l of lectures) {
+      const key = deterministicIdFor(l)
+      newIdentityCounts.set(key, (newIdentityCounts.get(key) ?? 0) + 1)
+    }
+    const idMap = new Map<string, string>()
+    for (const lecture of lectures) {
+      const key = deterministicIdFor(lecture)
+      if (newIdentityCounts.get(key) !== 1) continue
+      const oldId = oldIdByDeterministicId.get(key)
+      if (oldId !== undefined && oldId !== lecture.id) idMap.set(oldId, lecture.id)
+    }
+    const remap = (id: string) => idMap.get(id) ?? id
+
+    const remappedAttendance = dedupeByKey(
+      attendance.map(a => ({ ...a, lectureId: remap(a.lectureId) })),
+      a => `${a.lectureId}|${a.date}`
+    )
+    const remappedOverrides = overrides.map(o => ({ ...o, lectureId: remap(o.lectureId) }))
+
+    await AsyncStorage.setItem(LECTURES_KEY, JSON.stringify(lectures))
+    await AsyncStorage.setItem(TIMETABLE_IMPORTED_KEY, "true")
+    await AsyncStorage.setItem(ATTENDANCE_KEY, JSON.stringify(remappedAttendance))
+    await AsyncStorage.setItem(OVERRIDES_KEY, JSON.stringify(remappedOverrides))
+  })
 }
 
 // --- Day overrides: one-off changes to a single lecture on a single date ---
@@ -81,20 +157,24 @@ export const getAllOverrides = async (): Promise<DayOverride[]> => {
 }
 
 export const saveOverride = async (entry: DayOverride): Promise<void> => {
-  const raw = await AsyncStorage.getItem(OVERRIDES_KEY)
-  const all: DayOverride[] = raw ? safeJsonParse<DayOverride[]>(raw, []) : []
-  const updated = all.filter(
-    o => !(o.lectureId === entry.lectureId && o.date === entry.date)
-  )
-  updated.push(entry)
-  await AsyncStorage.setItem(OVERRIDES_KEY, JSON.stringify(updated))
+  await withWriteLock(async () => {
+    const raw = await AsyncStorage.getItem(OVERRIDES_KEY)
+    const all: DayOverride[] = raw ? safeJsonParse<DayOverride[]>(raw, []) : []
+    const updated = all.filter(
+      o => !(o.lectureId === entry.lectureId && o.date === entry.date)
+    )
+    updated.push(entry)
+    await AsyncStorage.setItem(OVERRIDES_KEY, JSON.stringify(updated))
+  })
 }
 
 export const clearOverride = async (lectureId: string, date: string): Promise<void> => {
-  const raw = await AsyncStorage.getItem(OVERRIDES_KEY)
-  const all: DayOverride[] = raw ? safeJsonParse<DayOverride[]>(raw, []) : []
-  const updated = all.filter(o => !(o.lectureId === lectureId && o.date === date))
-  await AsyncStorage.setItem(OVERRIDES_KEY, JSON.stringify(updated))
+  await withWriteLock(async () => {
+    const raw = await AsyncStorage.getItem(OVERRIDES_KEY)
+    const all: DayOverride[] = raw ? safeJsonParse<DayOverride[]>(raw, []) : []
+    const updated = all.filter(o => !(o.lectureId === lectureId && o.date === date))
+    await AsyncStorage.setItem(OVERRIDES_KEY, JSON.stringify(updated))
+  })
 }
 
 // --- One-off extra classes ---
@@ -115,27 +195,33 @@ export const getExtraLecturesForDate = async (date: string): Promise<ExtraLectur
 // Upserts by id, so editing an added class keeps its id (and therefore the
 // attendance already recorded against that id).
 export const saveExtraLecture = async (entry: ExtraLecture): Promise<void> => {
-  const all = await getExtraLectures()
-  const updated = all.filter(e => e.id !== entry.id)
-  updated.push(entry)
-  await AsyncStorage.setItem(EXTRA_LECTURES_KEY, JSON.stringify(updated))
+  await withWriteLock(async () => {
+    const all = await getExtraLectures()
+    const updated = all.filter(e => e.id !== entry.id)
+    updated.push(entry)
+    await AsyncStorage.setItem(EXTRA_LECTURES_KEY, JSON.stringify(updated))
+  })
 }
 
 export const removeExtraLecture = async (id: string): Promise<void> => {
-  const all = await getExtraLectures()
-  const updated = all.filter(e => e.id !== id)
-  await AsyncStorage.setItem(EXTRA_LECTURES_KEY, JSON.stringify(updated))
+  await withWriteLock(async () => {
+    const all = await getExtraLectures()
+    const updated = all.filter(e => e.id !== id)
+    await AsyncStorage.setItem(EXTRA_LECTURES_KEY, JSON.stringify(updated))
+  })
 }
 
 // Drops any override rows whose date has passed, so overrides never linger
 // beyond the single day they were meant for. Safe to call on every app load.
 export const pruneExpiredOverrides = async (todayDate: string): Promise<void> => {
-  const raw = await AsyncStorage.getItem(OVERRIDES_KEY)
-  const all: DayOverride[] = raw ? safeJsonParse<DayOverride[]>(raw, []) : []
-  const kept = all.filter(o => o.date >= todayDate)
-  if (kept.length !== all.length) {
-    await AsyncStorage.setItem(OVERRIDES_KEY, JSON.stringify(kept))
-  }
+  await withWriteLock(async () => {
+    const raw = await AsyncStorage.getItem(OVERRIDES_KEY)
+    const all: DayOverride[] = raw ? safeJsonParse<DayOverride[]>(raw, []) : []
+    const kept = all.filter(o => o.date >= todayDate)
+    if (kept.length !== all.length) {
+      await AsyncStorage.setItem(OVERRIDES_KEY, JSON.stringify(kept))
+    }
+  })
 }
 
 export const getBreaks = async (): Promise<Break[]> => {
@@ -153,35 +239,93 @@ export const getAttendance = async (): Promise<Attendance[]> => {
 }
 
 export const saveAttendance = async (entry: Attendance): Promise<void> => {
-  const data = await getAttendance()
-  const updated = data.filter(
-    e => !(e.lectureId === entry.lectureId && e.date === entry.date)
-  )
-  updated.push(entry)
-  await AsyncStorage.setItem(ATTENDANCE_KEY, JSON.stringify(updated))
+  await withWriteLock(async () => {
+    const data = await getAttendance()
+    const updated = data.filter(
+      e => !(e.lectureId === entry.lectureId && e.date === entry.date)
+    )
+    // Deterministic id (lectureId-date): the logical record for one class on
+    // one day always has the same id, instead of a fresh random one per write.
+    updated.push({ ...entry, id: `${entry.lectureId}-${entry.date}` })
+    await AsyncStorage.setItem(ATTENDANCE_KEY, JSON.stringify(updated))
+  })
 }
 
-// Merges many attendance entries in one read+write (used by CSV import),
-// instead of calling saveAttendance() per row which would do N sequential
-// AsyncStorage read-modify-writes. Entries with the same lectureId+date as
-// an incoming one are replaced, same "last write wins" semantics as
-// saveAttendance.
 // Deletes every attendance record for one (lectureId, date) pair. Used when
 // a class is removed for a day, so the removed class doesn't linger in
 // exports/imports/stats as attendance history - it's gone entirely.
 export const deleteAttendance = async (lectureId: string, date: string): Promise<void> => {
-  const data = await getAttendance()
-  const updated = data.filter(e => !(e.lectureId === lectureId && e.date === date))
-  await AsyncStorage.setItem(ATTENDANCE_KEY, JSON.stringify(updated))
+  await withWriteLock(async () => {
+    const data = await getAttendance()
+    const updated = data.filter(e => !(e.lectureId === lectureId && e.date === date))
+    await AsyncStorage.setItem(ATTENDANCE_KEY, JSON.stringify(updated))
+  })
 }
 
-export const saveAttendanceBulk = async (entries: Attendance[]): Promise<void> => {
-  if (entries.length === 0) return
-  const data = await getAttendance()
-  const incomingKey = (e: Attendance) => `${e.lectureId}|${e.date}`
-  const incomingKeys = new Set(entries.map(incomingKey))
-  const kept = data.filter(e => !incomingKeys.has(incomingKey(e)))
-  await AsyncStorage.setItem(ATTENDANCE_KEY, JSON.stringify([...kept, ...entries]))
+// Normalizes an incoming attendance batch for storage: every entry gets the
+// deterministic lectureId-date id, and rows repeating the same lecture+date
+// WITHIN one batch collapse to the last one, so a hand-merged CSV can't
+// double-count a class in stats. Shared by every multi-row write path.
+const normalizeAttendanceBatch = (entries: Attendance[]): Attendance[] =>
+  Array.from(
+    new Map(
+      entries.map(e => [`${e.lectureId}|${e.date}`, { ...e, id: `${e.lectureId}-${e.date}` }])
+    ).values()
+  )
+
+// Applies CSV-derived day plans atomically. Each plan is a complete snapshot
+// of one date: the CSV is the source of truth for that day. Attendance for
+// the planned dates is replaced with the plan's rows, all prior overrides
+// and one-off classes for those dates are dropped and re-derived (covered
+// master lectures keep their marks, uncovered master lectures get a
+// cancelled override = removed for the day, and time-moves / CSV-defined
+// one-off classes are written fresh). Everything on other dates is
+// untouched. One write per key, so a rebuild can't be interrupted halfway.
+export const applyCsvDayPlans = async (plans: CsvDayPlan[]): Promise<void> => {
+  if (plans.length === 0) return
+  await withWriteLock(async () => {
+    const [lectures, attendance, overrides, extras] = await Promise.all([
+      getLectures(),
+      getAttendance(),
+      getAllOverrides(),
+      getExtraLectures()
+    ])
+
+    const planDates = new Set(plans.map(p => p.date))
+
+    let newOverrides = overrides.filter(o => !planDates.has(o.date))
+    let newExtras = extras.filter(e => !planDates.has(e.date))
+    const keptAttendance = attendance.filter(a => !planDates.has(a.date))
+
+    for (const plan of plans) {
+      const weekday = getDayOfWeek(plan.date)
+      const covered = new Set(plan.coveredLectureIds)
+      // Every master lecture on that day that the CSV doesn't list is
+      // removed for the day, so the day shows exactly the CSV's classes.
+      for (const lecture of lectures) {
+        if (lecture.day !== weekday || covered.has(lecture.id)) continue
+        newOverrides.push({
+          id: `${lecture.id}-${plan.date}`,
+          date: plan.date,
+          lectureId: lecture.id,
+          cancelled: true
+        })
+      }
+      newOverrides.push(...plan.timeOverrides)
+      newExtras.push(...plan.extraLectures)
+    }
+
+    const writtenAttendance = [
+      ...keptAttendance,
+      ...normalizeAttendanceBatch(plans.flatMap(p => p.attendance))
+    ]
+
+    await Promise.all([
+      AsyncStorage.setItem(OVERRIDES_KEY, JSON.stringify(newOverrides)),
+      AsyncStorage.setItem(EXTRA_LECTURES_KEY, JSON.stringify(newExtras)),
+      AsyncStorage.setItem(ATTENDANCE_KEY, JSON.stringify(writtenAttendance))
+    ])
+  })
 }
 
 export const clearAllData = async (): Promise<void> => {
@@ -225,14 +369,16 @@ export const wasLowAttendanceNotified = async (subject: string): Promise<boolean
 }
 
 export const setLowAttendanceNotified = async (subject: string, notified: boolean): Promise<void> => {
-  const raw = await AsyncStorage.getItem(LOW_ATTENDANCE_NOTIFIED_KEY)
-  const map: Record<string, boolean> = raw ? safeJsonParse<Record<string, boolean>>(raw, {}) : {}
-  if (notified) {
-    map[subject] = true
-  } else {
-    delete map[subject]
-  }
-  await AsyncStorage.setItem(LOW_ATTENDANCE_NOTIFIED_KEY, JSON.stringify(map))
+  await withWriteLock(async () => {
+    const raw = await AsyncStorage.getItem(LOW_ATTENDANCE_NOTIFIED_KEY)
+    const map: Record<string, boolean> = raw ? safeJsonParse<Record<string, boolean>>(raw, {}) : {}
+    if (notified) {
+      map[subject] = true
+    } else {
+      delete map[subject]
+    }
+    await AsyncStorage.setItem(LOW_ATTENDANCE_NOTIFIED_KEY, JSON.stringify(map))
+  })
 }
 
 export const getSubjectThresholds = async (): Promise<Record<string, number>> => {
@@ -241,13 +387,15 @@ export const getSubjectThresholds = async (): Promise<Record<string, number>> =>
 }
 
 export const setSubjectThreshold = async (subject: string, value: number | null): Promise<void> => {
-  const map = await getSubjectThresholds()
-  if (value === null) {
-    delete map[subject]
-  } else {
-    map[subject] = value
-  }
-  await AsyncStorage.setItem(SUBJECT_THRESHOLDS_KEY, JSON.stringify(map))
+  await withWriteLock(async () => {
+    const map = await getSubjectThresholds()
+    if (value === null) {
+      delete map[subject]
+    } else {
+      map[subject] = value
+    }
+    await AsyncStorage.setItem(SUBJECT_THRESHOLDS_KEY, JSON.stringify(map))
+  })
 }
 
 // Pure resolution logic, single source of truth for how a subject's
@@ -310,30 +458,32 @@ export const getArchivedSemesters = async (): Promise<ArchivedSemester[]> => {
 }
 
 export const archiveCurrentSemester = async (): Promise<void> => {
-  const [attendance, lectures, semesterStart] = await Promise.all([
-    getAttendance(),
-    getLectures(),
-    getSemesterStartDate()
-  ])
+  await withWriteLock(async () => {
+    const [attendance, lectures, semesterStart] = await Promise.all([
+      getAttendance(),
+      getLectures(),
+      getSemesterStartDate()
+    ])
 
-  const endDate = getTodayDate()
-  const startDate = semesterStart ?? endDate
+    const endDate = getTodayDate()
+    const startDate = semesterStart ?? endDate
 
-  if (attendance.length > 0) {
-    const archived: ArchivedSemester = {
-      id: `sem-${Date.now()}`,
-      startDate,
-      endDate,
-      attendance,
-      lectures
+    if (attendance.length > 0) {
+      const archived: ArchivedSemester = {
+        id: `sem-${Date.now()}`,
+        startDate,
+        endDate,
+        attendance,
+        lectures
+      }
+      const existing = await getArchivedSemesters()
+      await AsyncStorage.setItem(ARCHIVED_SEMESTERS_KEY, JSON.stringify([...existing, archived]))
     }
-    const existing = await getArchivedSemesters()
-    await AsyncStorage.setItem(ARCHIVED_SEMESTERS_KEY, JSON.stringify([...existing, archived]))
-  }
 
-  // Clear current attendance, keep lectures, set new semester start
-  await AsyncStorage.setItem(ATTENDANCE_KEY, JSON.stringify([]))
-  await setSemesterStartDate(getTodayDate())
+    // Clear current attendance, keep lectures, set new semester start
+    await AsyncStorage.setItem(ATTENDANCE_KEY, JSON.stringify([]))
+    await setSemesterStartDate(getTodayDate())
+  })
 }
 
 // --- Holidays ---
@@ -360,18 +510,22 @@ export const addHoliday = async (date: string, label?: string): Promise<void> =>
   if (!isValidDateString(date)) {
     throw new Error(`Invalid date string: "${date}". Expected YYYY-MM-DD.`)
   }
-  const holidays = await getHolidays()
-  // Replace any existing entry for the same date rather than duplicating.
-  const updated = holidays.filter(h => h.date !== date)
-  updated.push({ date, label: label?.trim() ? label.trim() : undefined })
-  updated.sort((a, b) => a.date.localeCompare(b.date))
-  await AsyncStorage.setItem(HOLIDAYS_KEY, JSON.stringify(updated))
+  await withWriteLock(async () => {
+    const holidays = await getHolidays()
+    // Replace any existing entry for the same date rather than duplicating.
+    const updated = holidays.filter(h => h.date !== date)
+    updated.push({ date, label: label?.trim() ? label.trim() : undefined })
+    updated.sort((a, b) => a.date.localeCompare(b.date))
+    await AsyncStorage.setItem(HOLIDAYS_KEY, JSON.stringify(updated))
+  })
 }
 
 export const removeHoliday = async (date: string): Promise<void> => {
-  const holidays = await getHolidays()
-  const updated = holidays.filter(h => h.date !== date)
-  await AsyncStorage.setItem(HOLIDAYS_KEY, JSON.stringify(updated))
+  await withWriteLock(async () => {
+    const holidays = await getHolidays()
+    const updated = holidays.filter(h => h.date !== date)
+    await AsyncStorage.setItem(HOLIDAYS_KEY, JSON.stringify(updated))
+  })
 }
 
 // --- Class reminder settings ---

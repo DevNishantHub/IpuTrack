@@ -121,6 +121,26 @@ describe("parseAttendanceCsv - status normalization & whitespace", () => {
     if (result.ok) expect(result.entries[0].status).toBe("present")
   })
 
+  it("accepts a trailing sentence period on the last row's status (copy artifact from chat/spreadsheets)", () => {
+    // Copying a CSV out of a chat message often drags the sentence period
+    // onto the very last field, turning "present" into "present.".
+    const csv = "date,lectureId,subject,startTime,status\n2026-01-05,lec_1,Math,09:00,present."
+    const result = parseAttendanceCsv(csv, lectures)
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.skippedCount).toBe(0)
+      expect(result.entries).toHaveLength(1)
+      expect(result.entries[0].status).toBe("present")
+    }
+  })
+
+  it("still rejects a status where stripping punctuation leaves nothing valid, reporting the raw value", () => {
+    const csv = "date,lectureId,subject,startTime,status\n2026-01-05,lec_1,Math,09:00,unknown."
+    const result = parseAttendanceCsv(csv, lectures)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error).toMatch(/invalid status "unknown\."/)
+  })
+
   it("trims stray whitespace around field values", () => {
     const csv = "date,lectureId,subject,startTime,status\n 2026-01-05 , lec_1 ,Math,09:00, present "
     const result = parseAttendanceCsv(csv, lectures)
@@ -166,14 +186,15 @@ describe("parseAttendanceCsv - status normalization & whitespace", () => {
     const result = parseAttendanceCsv(csv, lectures)
     expect(result.ok).toBe(true)
     if (result.ok) {
-      // parseAttendanceCsv itself doesn't dedupe (that's saveAttendanceBulk's
-      // job) - assert it faithfully returns both rows for the caller to merge.
+      // parseAttendanceCsv itself doesn't dedupe (that's
+      // applyCsvDayPlans' job) - assert it faithfully returns both rows for
+      // the caller to collapse.
       expect(result.entries).toHaveLength(2)
       expect(result.entries.map(e => e.status)).toEqual(["present", "absent"])
     }
   })
 
-  it("generates unique ids for every parsed row even with identical date/lectureId", () => {
+  it("gives identical duplicate rows the same deterministic id (applyCsvDayPlans dedupes them later)", () => {
     const csv = [
       "date,lectureId,subject,startTime,status",
       "2026-01-05,lec_1,Math,09:00,present",
@@ -183,7 +204,10 @@ describe("parseAttendanceCsv - status normalization & whitespace", () => {
     expect(result.ok).toBe(true)
     if (result.ok) {
       const ids = result.entries.map(e => e.id)
-      expect(new Set(ids).size).toBe(ids.length)
+      // Same lecture+date -> same id (lectureId-date); the parser returns
+      // both rows and applyCsvDayPlans collapses them, last row wins.
+      expect(new Set(ids).size).toBe(1)
+      expect(ids[0]).toBe("l1-2026-01-05")
     }
   })
 
@@ -214,45 +238,101 @@ describe("parseAttendanceCsv - status normalization & whitespace", () => {
     }
   })
 
-  it("resolves rows to a one-off added class for that exact date when no master lecture matches", () => {
-    const extras: ExtraLecture[] = [
-      { id: "x1", date: "2026-01-05", subject: "Special Seminar", startTime: "14:00" }
-    ]
+  it("creates a one-off added class for a row that matches no master lecture on that date", () => {
     const csv = "date,lectureId,subject,startTime,status\n2026-01-05,ignored,Special Seminar,14:00,present"
-    const result = parseAttendanceCsv(csv, lectures, extras)
+    const result = parseAttendanceCsv(csv, lectures)
     expect(result.ok).toBe(true)
     if (result.ok) {
+      const plan = result.dayPlans.find(p => p.date === "2026-01-05")
+      expect(plan?.extraLectures).toHaveLength(1)
+      expect(plan?.extraLectures[0]).toMatchObject({ date: "2026-01-05", subject: "Special Seminar", startTime: "14:00" })
+      // Attendance links to the generated one-off class id.
       expect(result.entries).toHaveLength(1)
-      expect(result.entries[0].lectureId).toBe("x1")
+      expect(result.entries[0].lectureId).toBe(plan?.extraLectures[0].id)
     }
   })
 
-  it("does not match a one-off added class on any other date (extras are date-scoped)", () => {
-    const extras: ExtraLecture[] = [
-      { id: "x1", date: "2026-01-05", subject: "Special Seminar", startTime: "14:00" }
-    ]
+  it("creates the one-off class only for the date listed in the CSV", () => {
     const csv = "date,lectureId,subject,startTime,status\n2026-01-12,ignored,Special Seminar,14:00,present"
-    const result = parseAttendanceCsv(csv, lectures, extras)
-    expect(result.ok).toBe(false)
-  })
-
-  it("a master-timetable match wins over an extra class at the same time", () => {
-    const extras: ExtraLecture[] = [
-      { id: "x1", date: "2026-01-05", subject: "Math", startTime: "09:00" }
-    ]
-    const csv = "date,lectureId,subject,startTime,status\n2026-01-05,ignored,Math,09:00,present"
-    const result = parseAttendanceCsv(csv, lectures, extras)
+    const result = parseAttendanceCsv(csv, lectures)
     expect(result.ok).toBe(true)
-    if (result.ok) expect(result.entries[0].lectureId).toBe("l1")
+    if (result.ok) {
+      expect(result.dayPlans).toHaveLength(1)
+      expect(result.dayPlans[0].date).toBe("2026-01-12")
+      expect(result.dayPlans[0].extraLectures[0].date).toBe("2026-01-12")
+    }
   })
 
-  it("skips rows for a class that was removed for that day, so re-importing an old export doesn't resurrect it", () => {
-    const overrides: DayOverride[] = [
-      { id: "o1", date: "2026-01-05", lectureId: "l1", cancelled: true }
-    ]
+  it("attaches a row to the master lecture when the subject matches, without creating an extra", () => {
+    const csv = "date,lectureId,subject,startTime,status\n2026-01-05,ignored,Math,09:00,present"
+    const result = parseAttendanceCsv(csv, lectures)
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      const plan = result.dayPlans.find(p => p.date === "2026-01-05")
+      expect(plan?.coveredLectureIds).toContain("l1")
+      expect(plan?.extraLectures).toHaveLength(0)
+      expect(result.entries[0].lectureId).toBe("l1")
+    }
+  })
+
+  it("covers a class that was previously removed for that day when the CSV lists it (the CSV is the day's source of truth)", () => {
+    // A previously-removed class is no longer skipped: the plan covers it,
+    // and applyCsvDayPlans restores it for the day.
     const csv = "date,lectureId,subject,startTime,status\n2026-01-05,lec_1,Math,09:00,present"
-    const result = parseAttendanceCsv(csv, lectures, [], overrides)
+    const result = parseAttendanceCsv(csv, lectures)
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      const plan = result.dayPlans.find(p => p.date === "2026-01-05")
+      expect(plan?.coveredLectureIds).toContain("l1")
+      expect(result.skippedCount).toBe(0)
+    }
+  })
+
+  it("time-moves a covered master class when the CSV lists it at a different time", () => {
+    // Export writes the edited startTime (10:30) for 2026-01-05 while the
+    // master lecture stays at 09:00 - the row is resolved by subject and the
+    // different time becomes a day-only override.
+    const csv = "date,lectureId,subject,startTime,status\n2026-01-05,lec_1,Math,10:30,present"
+    const result = parseAttendanceCsv(csv, lectures)
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      const plan = result.dayPlans.find(p => p.date === "2026-01-05")
+      expect(plan?.coveredLectureIds).toContain("l1")
+      expect(plan?.timeOverrides).toHaveLength(1)
+      expect(plan?.timeOverrides[0]).toMatchObject({ lectureId: "l1", startTime: "10:30" })
+      expect(result.entries[0].lectureId).toBe("l1")
+      expect(result.entries[0].id).toBe("l1-2026-01-05")
+    }
+  })
+
+  it("skips a row when the subject matches multiple classes that day and the time pins down none of them", () => {
+    const dupLectures: Lecture[] = [
+      { id: "l1", subject: "Math", day: 1, startTime: "09:00" },
+      { id: "l4", subject: "Math", day: 1, startTime: "11:00" }
+    ]
+    const csv = "date,lectureId,subject,startTime,status\n2026-01-05,lec_1,Math,10:30,present"
+    const result = parseAttendanceCsv(csv, dupLectures)
     expect(result.ok).toBe(false)
-    if (!result.ok) expect(result.error).toMatch(/removed for that day/)
+    if (!result.ok) expect(result.error).toMatch(/classes named "Math"/)
+  })
+
+  it("resolves by subject when a row's time collides with another class's fixed slot", () => {
+    const lectures3: Lecture[] = [
+      { id: "l1", subject: "Math", day: 1, startTime: "09:00" },
+      { id: "l3", subject: "Physics", day: 1, startTime: "10:30" }
+    ]
+    const csv = "date,lectureId,subject,startTime,status\n2026-01-05,lec_1,Math,10:30,present"
+    const result = parseAttendanceCsv(csv, lectures3)
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      const plan = result.dayPlans.find(p => p.date === "2026-01-05")
+      // The row belongs to Math (subject decides) - moved to 10:30 for the
+      // day. Physics occupies 10:30 but isn't in the CSV, so the plan does
+      // NOT cover it and applyCsvDayPlans removes it for the day.
+      expect(plan?.coveredLectureIds).toContain("l1")
+      expect(plan?.coveredLectureIds).not.toContain("l3")
+      expect(plan?.timeOverrides[0]).toMatchObject({ lectureId: "l1", startTime: "10:30" })
+      expect(result.entries[0].lectureId).toBe("l1")
+    }
   })
 })
