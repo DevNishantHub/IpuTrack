@@ -1,7 +1,8 @@
 // src/screens/TodayScreen.tsx
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { View, Text, StyleSheet, ScrollView, Modal, TextInput, TouchableOpacity } from "react-native"
 import { SafeAreaView } from "react-native-safe-area-context"
+import { useFocusEffect } from "@react-navigation/native"
 import { MaterialIcons } from "@expo/vector-icons"
 import {
   getLectures,
@@ -12,9 +13,13 @@ import {
   clearOverride,
   pruneExpiredOverrides,
   getHolidayForDate,
-  removeHoliday
+  removeHoliday,
+  getExtraLecturesForDate,
+  saveExtraLecture,
+  removeExtraLecture,
+  deleteAttendance
 } from "../storage/storage"
-import { Lecture, Attendance, AttendanceStatus, DayOverride, Holiday } from "../types"
+import { Lecture, Attendance, AttendanceStatus, Holiday } from "../types"
 import { colors, elevation, radius, type as typo, spacing } from "../theme"
 import MdButton from "../components/MdButton"
 import {
@@ -36,7 +41,9 @@ const STATUS_META: Record<AttendanceStatus, { label: string; color: string; bg: 
 
 // A lecture merged with today's override (if any) for display purposes only.
 // The underlying master lecture id (used for attendance) never changes.
-type DisplayLecture = Lecture & { overridden: boolean }
+// `isExtra` marks one-off classes added for this exact date - they have no
+// master lecture behind them (see ExtraLecture).
+type DisplayLecture = Lecture & { overridden: boolean; isExtra?: boolean }
 
 const ALL_SUBJECTS = [...CLASS_SUBJECTS, ...LAB_SUBJECTS]
 
@@ -56,6 +63,29 @@ export default function TodayScreen() {
   const [editTime, setEditTime] = useState("")
   const [editNote, setEditNote] = useState("")
 
+  // Classes hidden for this day via Remove (cancelled override), so the user
+  // can restore them instead of being stuck with an irreversible removal.
+  const [removedLectures, setRemovedLectures] = useState<DisplayLecture[]>([])
+  // The class the user is being asked to confirm removing. Rendered as an
+  // inline confirm (on the card, or inside the edit modal) instead of a
+  // native Alert - RN Web's Alert is a no-op, so a native dialog would
+  // silently do nothing on web while the rest of the screen works.
+  const [confirmingRemove, setConfirmingRemove] = useState<DisplayLecture | null>(null)
+  const [showAddModal, setShowAddModal] = useState(false)
+  const [addSubject, setAddSubject] = useState("")
+  const [addTime, setAddTime] = useState("")
+  const [addNote, setAddNote] = useState("")
+
+  // Prune stale overrides exactly once, on mount - NOT on every load(). If
+  // this ran inside load() (which fires again right after saving an edit),
+  // it would delete the override you just created whenever you're backfilling
+  // a past day, since that override's date is before the real today. That
+  // made editing a previous day look like it silently failed.
+  useEffect(() => {
+    pruneExpiredOverrides(getTodayDate())
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   useEffect(() => {
     load()
     // Re-load whenever the viewed date changes, so switching days always
@@ -63,43 +93,88 @@ export default function TodayScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedDate])
 
-  const load = async (preloaded?: { allLectures: Lecture[]; allAttendance: Attendance[] }) => {
-    const todayDate = getTodayDate()
-    // Overrides only ever apply to "today" by design (they auto-expire), so
-    // pruning is still anchored to the real today, not the viewed date.
-    await pruneExpiredOverrides(todayDate)
+  // The tab navigator keeps this screen mounted across tab switches (lazy
+  // mount, no unmountOnBlur), so the date-keyed effect above only fires
+  // once per selectedDate and never again just from revisiting the tab.
+  // Without this, attendance/lectures/overrides changed elsewhere (CSV
+  // import, timetable edit, holiday add) while this screen sat in the
+  // background wouldn't show up until the viewed date happened to change.
+  // Refetching on every focus makes storage the single source of truth
+  // this screen always reflects, instead of a snapshot taken once at mount.
+  useFocusEffect(
+    useCallback(() => {
+      load()
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [selectedDate])
+  )
 
-    const [allLectures, allAttendance, overrides, holidayForDate] = await Promise.all([
+  const load = async (preloaded?: { allLectures: Lecture[]; allAttendance: Attendance[] }) => {
+    const [allLectures, allAttendance, overrides, holidayForDate, extras] = await Promise.all([
       preloaded ? Promise.resolve(preloaded.allLectures) : getLectures(),
       preloaded ? Promise.resolve(preloaded.allAttendance) : getAttendance(),
       getOverridesForDate(selectedDate),
-      getHolidayForDate(selectedDate)
+      getHolidayForDate(selectedDate),
+      getExtraLecturesForDate(selectedDate)
     ])
 
     setHoliday(holidayForDate)
 
     const overrideFor = (id: string) => overrides.find(o => o.lectureId === id)
 
-    const merged: DisplayLecture[] = allLectures
-      .filter((l: Lecture) => l.day === getDayOfWeek(selectedDate))
+    const dayLectures = allLectures.filter((l: Lecture) => l.day === getDayOfWeek(selectedDate))
+
+    // Master-timetable lectures merged with today's override (if any), minus
+    // any removed for this day - those land in `removed` below so they can
+    // be restored. One-off classes added for this date are appended.
+    const merged: DisplayLecture[] = [
+      ...dayLectures
+        .map(l => {
+          const o = overrideFor(l.id)
+          if (!o) return { ...l, overridden: false, isExtra: false }
+          return {
+            ...l,
+            subject: o.subject ?? l.subject,
+            startTime: o.startTime ?? l.startTime,
+            note: o.note ?? l.note,
+            overridden: true,
+            isExtra: false
+          }
+        })
+        .filter(l => {
+          const o = overrideFor(l.id)
+          return !(o && o.cancelled)
+        }),
+      ...extras.map(e => ({
+        id: e.id,
+        subject: e.subject,
+        day: getDayOfWeek(selectedDate),
+        startTime: e.startTime,
+        note: e.note,
+        overridden: false,
+        isExtra: true
+      }))
+    ].sort((a, b) => toMinutes(a.startTime) - toMinutes(b.startTime))
+
+    // Classes removed for this day (cancelled override), shown in the
+    // "Removed for this day" section with a Restore action.
+    const removed: DisplayLecture[] = dayLectures
       .map(l => {
         const o = overrideFor(l.id)
-        if (!o) return { ...l, overridden: false }
+        if (!o || !o.cancelled) return null
         return {
           ...l,
           subject: o.subject ?? l.subject,
           startTime: o.startTime ?? l.startTime,
           note: o.note ?? l.note,
-          overridden: true
-        }
+          overridden: true,
+          isExtra: false
+        } as DisplayLecture
       })
-      .filter(l => {
-        const o = overrideFor(l.id)
-        return !(o && o.cancelled)
-      })
+      .filter((l): l is DisplayLecture => l !== null)
       .sort((a, b) => toMinutes(a.startTime) - toMinutes(b.startTime))
 
     setDisplayLectures(merged)
+    setRemovedLectures(removed)
     setDayAttendance(allAttendance.filter((a: Attendance) => a.date === selectedDate))
   }
 
@@ -121,10 +196,15 @@ export default function TodayScreen() {
     const [allLectures, allAttendance] = await Promise.all([getLectures(), getAttendance()])
 
     // Check for low attendance notification (only for present/absent).
-    // Awaited (and run before load()) so the notified-flag write in
-    // AsyncStorage always finishes before the next mark() or reload can
-    // read/write it - avoids double-notify and missed-reset races.
-    if (status !== "cancelled") {
+    // Skipped for one-off added classes: they're not in the master
+    // timetable, so there's no subject to resolve a threshold against -
+    // checkLowAttendanceAndNotify would only log a "no lecture found"
+    // warning on every tap. Awaited (and run before load()) so the
+    // notified-flag write in AsyncStorage always finishes before the next
+    // mark() or reload can read/write it - avoids double-notify and
+    // missed-reset races.
+    const isExtra = displayLectures.find(l => l.id === lectureId)?.isExtra
+    if (status !== "cancelled" && !isExtra) {
       await checkLowAttendanceAndNotify(lectureId, allLectures, allAttendance)
     }
 
@@ -164,27 +244,89 @@ export default function TodayScreen() {
   const saveTodayEdit = async () => {
     if (!editing) return
     if (!/^\d{1,2}:\d{2}$/.test(editTime.trim())) return
-    await saveOverride({
-      id: `${editing.id}-${selectedDate}`,
-      date: selectedDate,
-      lectureId: editing.id,
-      subject: editSubject.trim() || editing.subject,
-      startTime: editTime.trim(),
-      note: editNote.trim() || undefined
-    })
+    if (editing.isExtra) {
+      // A one-off added class is edited in place - same id, so any
+      // attendance already recorded against it stays linked.
+      await saveExtraLecture({
+        id: editing.id,
+        date: selectedDate,
+        subject: editSubject.trim() || editing.subject,
+        startTime: editTime.trim(),
+        note: editNote.trim() || undefined
+      })
+    } else {
+      await saveOverride({
+        id: `${editing.id}-${selectedDate}`,
+        date: selectedDate,
+        lectureId: editing.id,
+        subject: editSubject.trim() || editing.subject,
+        startTime: editTime.trim(),
+        note: editNote.trim() || undefined
+      })
+    }
     setEditing(null)
     await load()
   }
 
-  const cancelToday = async () => {
-    if (!editing) return
-    await saveOverride({
-      id: `${editing.id}-${selectedDate}`,
-      date: selectedDate,
-      lectureId: editing.id,
-      cancelled: true
-    })
+  // Ask for confirmation before removing. Removing deletes that day's
+  // attendance, so it must be explicit - but the confirm is rendered inline
+  // (see the card/modal below) rather than via a native Alert, so it works
+  // on every platform the app runs on, including web.
+  const confirmRemove = (l: DisplayLecture) => setConfirmingRemove(l)
+
+  const cancelRemove = () => setConfirmingRemove(null)
+
+  // Removes a class for the selected day only. For a master-timetable class
+  // this writes a cancelled override (it stays in the weekly timetable); for
+  // an added one-off class it deletes the class itself. Either way, any
+  // attendance recorded for that (class, date) is deleted too, so the class
+  // is fully gone from stats and from CSV export/import for that day.
+  const doRemove = async (l: DisplayLecture) => {
+    setConfirmingRemove(null)
+    try {
+      if (l.isExtra) {
+        await removeExtraLecture(l.id)
+      } else {
+        await saveOverride({
+          id: `${l.id}-${selectedDate}`,
+          date: selectedDate,
+          lectureId: l.id,
+          cancelled: true
+        })
+      }
+      await deleteAttendance(l.id, selectedDate)
+    } catch (err) {
+      console.warn("Failed to remove class for the day:", err)
+    }
     setEditing(null)
+    await load()
+  }
+
+  const restoreRemoved = async (l: DisplayLecture) => {
+    await clearOverride(l.id, selectedDate)
+    await load()
+  }
+
+  const openAdd = () => {
+    setAddSubject(ALL_SUBJECTS[0])
+    setAddTime("")
+    setAddNote("")
+    setShowAddModal(true)
+  }
+
+  const closeAdd = () => setShowAddModal(false)
+
+  const saveAdd = async () => {
+    const time = addTime.trim()
+    if (!/^\d{1,2}:\d{2}$/.test(time)) return
+    await saveExtraLecture({
+      id: `extra-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      date: selectedDate,
+      subject: addSubject.trim() || ALL_SUBJECTS[0],
+      startTime: time,
+      note: addNote.trim() || undefined
+    })
+    closeAdd()
     await load()
   }
 
@@ -291,10 +433,21 @@ export default function TodayScreen() {
           </View>
         )}
 
+        {!holiday && (
+          <MdButton
+            title="Add class for this day"
+            variant="outlined"
+            onPress={openAdd}
+            style={styles.addClassBtn}
+          />
+        )}
+
         {!holiday && displayLectures.length === 0 && (
           <View style={styles.emptyCard}>
             <MaterialIcons name="event-available" size={32} color={colors.onSurfaceVariant} />
-            <Text style={styles.empty}>No lectures scheduled for today.</Text>
+            <Text style={styles.empty}>
+              No lectures scheduled for this day. Use "Add class for this day" to add a one-off class.
+            </Text>
           </View>
         )}
 
@@ -310,6 +463,11 @@ export default function TodayScreen() {
                     {l.overridden && (
                       <View style={styles.editedBadge}>
                         <Text style={styles.editedBadgeText}>Edited for today</Text>
+                      </View>
+                    )}
+                    {l.isExtra && (
+                      <View style={styles.addedBadge}>
+                        <Text style={styles.addedBadgeText}>Added for today</Text>
                       </View>
                     )}
                   </View>
@@ -331,26 +489,59 @@ export default function TodayScreen() {
                   style={styles.editBtn}
                 />
               </View>
-              <View style={styles.buttonRow}>
-                <MdButton
-                  title="Present"
-                  variant={current === "present" ? "filled" : "tonal"}
-                  onPress={() => mark(l.id, "present")}
-                />
-                <MdButton
-                  title="Absent"
-                  variant={current === "absent" ? "danger" : "outlined"}
-                  onPress={() => mark(l.id, "absent")}
-                />
-                <MdButton
-                  title="Cancelled"
-                  variant="text"
-                  onPress={() => mark(l.id, "cancelled")}
-                />
-              </View>
+              {confirmingRemove?.id === l.id ? (
+                <View style={styles.confirmCard}>
+                  <Text style={styles.confirmText}>
+                    {l.isExtra
+                      ? `Remove "${l.subject}" at ${l.startTime} for ${selectedDate}? It only exists on this date, and any attendance you marked for it that day will be deleted.`
+                      : `Remove "${l.subject}" at ${l.startTime} for ${selectedDate}? It stays in your weekly timetable (hidden for this day only), and any attendance you marked for it that day will be deleted.`}
+                  </Text>
+                  <View style={styles.confirmButtons}>
+                    <MdButton title="Keep" variant="text" onPress={cancelRemove} />
+                    <MdButton title="Remove" variant="danger" onPress={() => doRemove(l)} />
+                  </View>
+                </View>
+              ) : (
+                <View style={styles.buttonRow}>
+                  <MdButton
+                    title="Present"
+                    variant={current === "present" ? "filled" : "tonal"}
+                    onPress={() => mark(l.id, "present")}
+                  />
+                  <MdButton
+                    title="Absent"
+                    variant={current === "absent" ? "danger" : "outlined"}
+                    onPress={() => mark(l.id, "absent")}
+                  />
+                  <MdButton
+                    title="Remove"
+                    variant="text"
+                    onPress={() => confirmRemove(l)}
+                    style={styles.removeBtn}
+                  />
+                </View>
+              )}
             </View>
           )
         })}
+
+        {!holiday && removedLectures.length > 0 && (
+          <View>
+            <Text style={styles.removedLabel}>REMOVED FOR THIS DAY</Text>
+            {removedLectures.map(l => (
+              <View key={l.id} style={styles.removedCard}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.removedTitle}>{l.subject}</Text>
+                  <Text style={styles.removedTime}>
+                    {l.startTime}
+                    {l.note ? `  ·  ${l.note}` : ""}
+                  </Text>
+                </View>
+                <MdButton title="Restore" variant="text" onPress={() => restoreRemoved(l)} />
+              </View>
+            ))}
+          </View>
+        )}
       </ScrollView>
 
       <Modal visible={!!editing} transparent animationType="fade" onRequestClose={closeEdit}>
@@ -358,7 +549,9 @@ export default function TodayScreen() {
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>Change just for today</Text>
             <Text style={styles.modalSubtitle}>
-              This only affects {editing?.subject} today. Your permanent timetable stays the same.
+              {editing?.isExtra
+                ? `This class only exists on ${selectedDate}, so changes apply here only.`
+                : `This only affects ${editing?.subject} today. Your permanent timetable stays the same.`}
             </Text>
 
             <Text style={styles.label}>Subject</Text>
@@ -380,15 +573,66 @@ export default function TodayScreen() {
             <Text style={styles.label}>Note (optional)</Text>
             <TextInput style={styles.input} value={editNote} onChangeText={setEditNote} placeholder="e.g. room 512" />
 
+            {confirmingRemove?.id === editing?.id ? (
+              <View style={styles.confirmCard}>
+                <Text style={styles.confirmText}>
+                  {editing?.isExtra
+                    ? `Remove "${editing?.subject}" for ${selectedDate}? It only exists on this date, and any attendance you marked for it that day will be deleted.`
+                    : `Remove "${editing?.subject}" for ${selectedDate}? It stays in your weekly timetable (hidden for this day only), and any attendance you marked for it that day will be deleted.`}
+                </Text>
+                <View style={styles.confirmButtons}>
+                  <MdButton title="Keep" variant="text" onPress={cancelRemove} />
+                  <MdButton title="Remove" variant="danger" onPress={() => editing && doRemove(editing)} />
+                </View>
+              </View>
+            ) : (
+              <>
+                <View style={styles.modalButtonsRow}>
+                  <MdButton title="Remove class for today" variant="danger" onPress={() => editing && confirmRemove(editing)} />
+                  {editing?.overridden && !editing?.isExtra && (
+                    <MdButton title="Revert to normal" variant="text" onPress={revertToday} />
+                  )}
+                </View>
+                <View style={styles.modalButtonsRow}>
+                  <MdButton title="Close" variant="text" onPress={closeEdit} />
+                  <MdButton title="Save for today" variant="filled" onPress={saveTodayEdit} />
+                </View>
+              </>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={showAddModal} transparent animationType="fade" onRequestClose={closeAdd}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Add class for {selectedDate}</Text>
+            <Text style={styles.modalSubtitle}>
+              A one-off class for this day only - it won't appear on any other day.
+            </Text>
+
+            <Text style={styles.label}>Subject</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipRow}>
+              {ALL_SUBJECTS.map(s => (
+                <TouchableOpacity
+                  key={s}
+                  style={[styles.chip, addSubject === s && styles.chipActive]}
+                  onPress={() => setAddSubject(s)}
+                >
+                  <Text style={addSubject === s ? styles.chipTextActive : styles.chipText}>{s}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+
+            <Text style={styles.label}>Time (HH:MM)</Text>
+            <TextInput style={styles.input} value={addTime} onChangeText={setAddTime} placeholder="10:00" />
+
+            <Text style={styles.label}>Note (optional)</Text>
+            <TextInput style={styles.input} value={addNote} onChangeText={setAddNote} placeholder="e.g. room 512" />
+
             <View style={styles.modalButtonsRow}>
-              <MdButton title="Cancel class today" variant="danger" onPress={cancelToday} />
-              {editing?.overridden && (
-                <MdButton title="Revert to normal" variant="text" onPress={revertToday} />
-              )}
-            </View>
-            <View style={styles.modalButtonsRow}>
-              <MdButton title="Close" variant="text" onPress={closeEdit} />
-              <MdButton title="Save for today" variant="filled" onPress={saveTodayEdit} />
+              <MdButton title="Close" variant="text" onPress={closeAdd} />
+              <MdButton title="Add class" variant="filled" onPress={saveAdd} />
             </View>
           </View>
         </View>
@@ -521,5 +765,33 @@ const styles = StyleSheet.create({
   },
   chipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
   chipText: { color: colors.onSurface },
-  chipTextActive: { color: colors.onPrimary, fontWeight: "600" }
+  chipTextActive: { color: colors.onPrimary, fontWeight: "600" },
+  addClassBtn: { alignSelf: "flex-start", marginBottom: spacing(3) },
+  addedBadge: {
+    backgroundColor: colors.successContainer,
+    borderRadius: radius.full,
+    paddingVertical: 2,
+    paddingHorizontal: 8
+  },
+  addedBadgeText: { fontSize: 10, fontWeight: "600", color: colors.success },
+  removeBtn: { paddingHorizontal: 8 },
+  confirmCard: {
+    backgroundColor: colors.errorContainer,
+    borderRadius: radius.md,
+    padding: spacing(4),
+    marginTop: spacing(2)
+  },
+  confirmText: { ...typo.body, color: colors.onSurface, marginBottom: spacing(3) },
+  confirmButtons: { flexDirection: "row", justifyContent: "flex-end", gap: spacing(2) },
+  removedLabel: { ...typo.label, textTransform: "uppercase", letterSpacing: 0.5, marginTop: spacing(3), marginBottom: spacing(2) },
+  removedCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: colors.neutralContainer,
+    borderRadius: radius.md,
+    padding: spacing(3),
+    marginBottom: spacing(2)
+  },
+  removedTitle: { ...typo.body, fontWeight: "600" },
+  removedTime: { fontSize: 12, color: colors.onSurfaceVariant, marginTop: 2 }
 })

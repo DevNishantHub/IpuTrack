@@ -11,6 +11,14 @@ const REMINDER_CHANNEL_ID = "class-reminders"
 // touching the unrelated low-attendance notification.
 const REMINDER_ID_PREFIX = "class-reminder-"
 
+// Notification text (subject, note) can come from AI-imported timetable
+// JSON, which isn't a trusted source - strip control/newline chars and cap
+// length before it lands in any notification body. Single implementation so
+// every call site enforces the same rule instead of each hand-rolling its
+// own copy that can silently drift from the others.
+const sanitizeForNotification = (value: string): string =>
+  value.replace(/[\r\n\t]/g, " ").trim().slice(0, 50)
+
 export const ensureNotificationPermission = async (): Promise<boolean> => {
   try {
     const { status } = await Notifications.getPermissionsAsync()
@@ -31,10 +39,7 @@ export const notifyLowAttendance = async (
   percentage: number,
   threshold: number
 ): Promise<void> => {
-  // Subject comes from AI-imported timetable JSON, not a trusted source -
-  // strip control/newline chars and cap length before it lands in a
-  // notification body.
-  const safeSubject = subject.replace(/[\r\n\t]/g, " ").trim().slice(0, 50)
+  const safeSubject = sanitizeForNotification(subject)
   try {
     await Notifications.setNotificationChannelAsync(CHANNEL_ID, {
       name: "Low Attendance",
@@ -121,8 +126,8 @@ export const scheduleClassReminders = async (
     const reminderHour = Math.floor(totalMinutes / 60) % 24
     const reminderMinute = totalMinutes % 60
 
-    const safeSubject = lecture.subject.replace(/[\r\n\t]/g, " ").trim().slice(0, 50)
-    const safeNote = lecture.note?.replace(/[\r\n\t]/g, " ").trim().slice(0, 50)
+    const safeSubject = sanitizeForNotification(lecture.subject)
+    const safeNote = lecture.note ? sanitizeForNotification(lecture.note) : undefined
 
     try {
       await Notifications.scheduleNotificationAsync({

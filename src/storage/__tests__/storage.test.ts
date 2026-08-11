@@ -7,6 +7,11 @@ import {
   saveOverride,
   clearOverride,
   pruneExpiredOverrides,
+  getExtraLectures,
+  getExtraLecturesForDate,
+  saveExtraLecture,
+  removeExtraLecture,
+  deleteAttendance,
   getBreaks,
   saveBreaks,
   getAttendance,
@@ -34,7 +39,7 @@ import {
   DEFAULT_ATTENDANCE_THRESHOLD,
   DEFAULT_REMINDER_MINUTES_BEFORE
 } from "../storage"
-import { Attendance, DayOverride, Lecture } from "../../types"
+import { Attendance, DayOverride, ExtraLecture, Lecture } from "../../types"
 
 // mock has .clear(); reset between every test so no state leaks
 afterEach(async () => {
@@ -47,6 +52,10 @@ const lecture = (id: string, subject = "Math", day = 1, startTime = "09:00"): Le
 
 const record = (id: string, lectureId: string, date: string, status: Attendance["status"]): Attendance => ({
   id, lectureId, date, status
+})
+
+const extra = (id: string, date = "2026-01-05", subject = "Seminar", startTime = "14:00"): ExtraLecture => ({
+  id, date, subject, startTime
 })
 
 describe("getLectures / setMasterTimetable / isTimetableImported", () => {
@@ -137,6 +146,66 @@ describe("day overrides", () => {
     await AsyncStorage.setItem("dayOverrides", "not json")
     const result = await getOverridesForDate("2026-01-01")
     expect(result).toEqual([])
+  })
+})
+
+describe("one-off extra classes", () => {
+  it("returns an empty list on first read", async () => {
+    expect(await getExtraLectures()).toEqual([])
+    expect(await getExtraLecturesForDate("2026-01-05")).toEqual([])
+  })
+
+  it("getExtraLecturesForDate returns only extras for the requested date", async () => {
+    await saveExtraLecture(extra("x1", "2026-01-05", "Seminar A"))
+    await saveExtraLecture(extra("x2", "2026-01-06", "Seminar B"))
+    const jan5 = await getExtraLecturesForDate("2026-01-05")
+    expect(jan5.map(e => e.id)).toEqual(["x1"])
+    expect(await getExtraLectures()).toHaveLength(2)
+  })
+
+  it("saveExtraLecture upserts by id so editing keeps the id (and its attendance link)", async () => {
+    await saveExtraLecture(extra("x1", "2026-01-05", "Old", "14:00"))
+    await saveExtraLecture(extra("x1", "2026-01-05", "New", "15:00"))
+    const all = await getExtraLectures()
+    expect(all).toHaveLength(1)
+    expect(all[0].subject).toBe("New")
+    expect(all[0].startTime).toBe("15:00")
+  })
+
+  it("removeExtraLecture deletes only the targeted class", async () => {
+    await saveExtraLecture(extra("x1", "2026-01-05"))
+    await saveExtraLecture(extra("x2", "2026-01-05"))
+    await removeExtraLecture("x1")
+    const all = await getExtraLectures()
+    expect(all.map(e => e.id)).toEqual(["x2"])
+  })
+
+  it("removeExtraLecture on a non-existent id is a no-op, not an error", async () => {
+    await expect(removeExtraLecture("nope")).resolves.toBeUndefined()
+  })
+
+  it("survives corrupted storage by treating it as empty", async () => {
+    await AsyncStorage.setItem("extraLectures", "not json")
+    expect(await getExtraLectures()).toEqual([])
+  })
+})
+
+describe("deleteAttendance", () => {
+  it("deletes only the targeted lectureId+date pair, keeping everything else", async () => {
+    await saveAttendance(record("1", "l1", "2026-01-05", "present"))
+    await saveAttendance(record("2", "l1", "2026-01-06", "present"))
+    await saveAttendance(record("3", "l2", "2026-01-05", "absent"))
+    await deleteAttendance("l1", "2026-01-05")
+    const all = await getAttendance()
+    expect(all).toHaveLength(2)
+    expect(all.some(a => a.lectureId === "l1" && a.date === "2026-01-05")).toBe(false)
+  })
+
+  it("is a no-op when no record matches", async () => {
+    await saveAttendance(record("1", "l1", "2026-01-05", "present"))
+    const before = await AsyncStorage.getItem("attendance")
+    await deleteAttendance("l1", "2026-02-01")
+    expect(await AsyncStorage.getItem("attendance")).toBe(before)
   })
 })
 
@@ -236,10 +305,11 @@ describe("saveAttendanceBulk", () => {
 })
 
 describe("clearAllData", () => {
-  it("wipes attendance, lectures, overrides, thresholds, holidays, reminder settings", async () => {
+  it("wipes attendance, lectures, overrides, extra classes, thresholds, holidays, reminder settings", async () => {
     await getLectures()
     await saveAttendance(record("1", "l1", "2026-01-01", "present"))
     await saveOverride({ id: "o1", date: "2026-01-01", lectureId: "l1" })
+    await saveExtraLecture(extra("x1", "2026-01-01"))
     await setAttendanceThreshold(80)
     await setLowAttendanceNotified("Math", true)
     await setSubjectThreshold("Math", 90)
@@ -250,6 +320,7 @@ describe("clearAllData", () => {
 
     expect(await getAttendance()).toEqual([])
     expect(await getOverridesForDate("2026-01-01")).toEqual([])
+    expect(await getExtraLectures()).toEqual([])
     expect(await getAttendanceThreshold()).toBe(DEFAULT_ATTENDANCE_THRESHOLD)
     expect(await wasLowAttendanceNotified("Math")).toBe(false)
     expect(await getSubjectThresholds()).toEqual({})

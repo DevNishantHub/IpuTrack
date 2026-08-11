@@ -29,15 +29,17 @@ describe("attendanceToCsv", () => {
 })
 
 describe("parseAttendanceCsv", () => {
-  it("round-trips a simple valid CSV", () => {
-    const csv = "date,lectureId,subject,startTime,status\n2026-01-05,lec_1,AI,08:30,present"
-    const result = parseAttendanceCsv(csv)
+  it("round-trips a simple valid CSV, resolving the row to the current timetable", () => {
+    // 2026-01-05 is a Monday; the file's lectureId (lec_1) is deliberately
+    // ignored - the row is matched to Math at 09:00 on the current timetable.
+    const csv = "date,lectureId,subject,startTime,status\n2026-01-05,lec_1,Math,09:00,present"
+    const result = parseAttendanceCsv(csv, lectures)
     expect(result.ok).toBe(true)
     if (result.ok) {
       expect(result.entries).toHaveLength(1)
       expect(result.entries[0]).toMatchObject({
         date: "2026-01-05",
-        lectureId: "lec_1",
+        lectureId: "l1",
         status: "present"
       })
       expect(result.skippedCount).toBe(0)
@@ -45,29 +47,30 @@ describe("parseAttendanceCsv", () => {
   })
 
   it("handles quoted fields containing commas", () => {
-    const csv = 'date,lectureId,subject,startTime,status\n2026-01-05,lec_1,"Physics, Advanced",08:30,present'
-    const result = parseAttendanceCsv(csv)
+    const csv = 'date,lectureId,subject,startTime,status\n2026-01-06,lec_2,"Physics, Advanced",10:00,present'
+    const result = parseAttendanceCsv(csv, lectures)
     expect(result.ok).toBe(true)
+    if (result.ok) expect(result.entries[0].lectureId).toBe("l2")
   })
 
   it("handles escaped double-quotes inside quoted fields", () => {
-    const csv = 'date,lectureId,subject,startTime,status\n2026-01-05,lec_1,"He said ""hi""",08:30,present'
-    const result = parseAttendanceCsv(csv)
+    const csv = 'date,lectureId,subject,startTime,status\n2026-01-05,lec_1,"He said ""hi""",09:00,present'
+    const result = parseAttendanceCsv(csv, lectures)
     expect(result.ok).toBe(true)
   })
 
   it("rejects empty input", () => {
-    const result = parseAttendanceCsv("")
+    const result = parseAttendanceCsv("", lectures)
     expect(result.ok).toBe(false)
   })
 
   it("rejects a header-only file with no data rows", () => {
-    const result = parseAttendanceCsv("date,lectureId,subject,startTime,status")
+    const result = parseAttendanceCsv("date,lectureId,subject,startTime,status", lectures)
     expect(result.ok).toBe(false)
   })
 
   it("rejects input missing required columns", () => {
-    const result = parseAttendanceCsv("foo,bar\n1,2")
+    const result = parseAttendanceCsv("foo,bar\n1,2", lectures)
     expect(result.ok).toBe(false)
     if (!result.ok) {
       expect(result.error).toMatch(/Missing required columns/)
@@ -77,10 +80,10 @@ describe("parseAttendanceCsv", () => {
   it("skips rows with invalid dates but keeps valid ones", () => {
     const csv = [
       "date,lectureId,subject,startTime,status",
-      "not-a-date,lec_1,AI,08:30,present",
-      "2026-01-05,lec_1,AI,08:30,present"
+      "not-a-date,lec_1,Math,09:00,present",
+      "2026-01-05,lec_1,Math,09:00,present"
     ].join("\n")
-    const result = parseAttendanceCsv(csv)
+    const result = parseAttendanceCsv(csv, lectures)
     expect(result.ok).toBe(true)
     if (result.ok) {
       expect(result.entries).toHaveLength(1)
@@ -91,40 +94,45 @@ describe("parseAttendanceCsv", () => {
   it("skips rows with invalid status values", () => {
     const csv = [
       "date,lectureId,subject,startTime,status",
-      "2026-01-05,lec_1,AI,08:30,maybe"
+      "2026-01-05,lec_1,Math,09:00,maybe"
     ].join("\n")
-    const result = parseAttendanceCsv(csv)
+    const result = parseAttendanceCsv(csv, lectures)
     expect(result.ok).toBe(false)
   })
 
-  it("skips rows with a missing lectureId", () => {
+  it("accepts rows with an empty lectureId column (matched by date + startTime instead)", () => {
     const csv = [
       "date,lectureId,subject,startTime,status",
-      "2026-01-05,,AI,08:30,present"
+      "2026-01-05,,Math,09:00,present"
     ].join("\n")
-    const result = parseAttendanceCsv(csv)
-    expect(result.ok).toBe(false)
+    const result = parseAttendanceCsv(csv, lectures)
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.entries).toHaveLength(1)
+      expect(result.entries[0].lectureId).toBe("l1")
+    }
   })
 
   it("ignores extra/unrecognized columns", () => {
     const csv = [
       "date,lectureId,subject,startTime,status,notes",
-      "2026-01-05,lec_1,AI,08:30,present,some notes here"
+      "2026-01-05,lec_1,Math,09:00,present,some notes here"
     ].join("\n")
-    const result = parseAttendanceCsv(csv)
+    const result = parseAttendanceCsv(csv, lectures)
     expect(result.ok).toBe(true)
   })
 
   it("is column-order independent (matches header names, not position)", () => {
     const csv = [
-      "status,date,lectureId",
-      "present,2026-01-05,lec_1"
+      "status,date,starttime",
+      "present,2026-01-05,09:00"
     ].join("\n")
-    const result = parseAttendanceCsv(csv)
+    const result = parseAttendanceCsv(csv, lectures)
     expect(result.ok).toBe(true)
     if (result.ok) {
       expect(result.entries[0].date).toBe("2026-01-05")
       expect(result.entries[0].status).toBe("present")
+      expect(result.entries[0].lectureId).toBe("l1")
     }
   })
 })

@@ -1,6 +1,6 @@
 // src/storage/storage.ts
 import AsyncStorage from "@react-native-async-storage/async-storage"
-import { Attendance, Lecture, Break, DayOverride, ArchivedSemester, Holiday } from "../types"
+import { Attendance, Lecture, Break, DayOverride, ArchivedSemester, Holiday, ExtraLecture } from "../types"
 import { getTodayDate, isValidDateString } from "../utils/dateHelpers"
 import { cancelAllClassReminders } from "../utils/notifications"
 
@@ -9,6 +9,7 @@ const ATTENDANCE_KEY = "attendance"
 const BREAKS_KEY = "breaks"
 const TIMETABLE_IMPORTED_KEY = "timetableImported"
 const OVERRIDES_KEY = "dayOverrides"
+const EXTRA_LECTURES_KEY = "extraLectures"
 const ATTENDANCE_THRESHOLD_KEY = "attendanceThreshold"
 const LOW_ATTENDANCE_NOTIFIED_KEY = "lowAttendanceNotified"
 const SUBJECT_THRESHOLDS_KEY = "subjectThresholds"
@@ -67,6 +68,18 @@ export const getOverridesForDate = async (date: string): Promise<DayOverride[]> 
   return all.filter(o => o.date === date)
 }
 
+// All override rows currently in storage, regardless of date. Overrides are
+// meant to be "today-only" from the Today screen's point of view, but they
+// aren't pruned until pruneExpiredOverrides() next runs - so a same-day (or
+// backfilled future-day) edit is live in storage before it expires. Anything
+// that needs to render historical attendance rows with the subject/startTime
+// the user actually saw that day (e.g. CSV export) should read this instead
+// of getLectures() alone, or it'll silently show the un-edited master value.
+export const getAllOverrides = async (): Promise<DayOverride[]> => {
+  const raw = await AsyncStorage.getItem(OVERRIDES_KEY)
+  return raw ? safeJsonParse<DayOverride[]>(raw, []) : []
+}
+
 export const saveOverride = async (entry: DayOverride): Promise<void> => {
   const raw = await AsyncStorage.getItem(OVERRIDES_KEY)
   const all: DayOverride[] = raw ? safeJsonParse<DayOverride[]>(raw, []) : []
@@ -82,6 +95,36 @@ export const clearOverride = async (lectureId: string, date: string): Promise<vo
   const all: DayOverride[] = raw ? safeJsonParse<DayOverride[]>(raw, []) : []
   const updated = all.filter(o => !(o.lectureId === lectureId && o.date === date))
   await AsyncStorage.setItem(OVERRIDES_KEY, JSON.stringify(updated))
+}
+
+// --- One-off extra classes ---
+// A class added from the Today tab for a single date (e.g. a special lecture
+// not in the master timetable). Stored separately from the master timetable
+// and from DayOverrides: it exists only on `date` and never on other days.
+
+export const getExtraLectures = async (): Promise<ExtraLecture[]> => {
+  const raw = await AsyncStorage.getItem(EXTRA_LECTURES_KEY)
+  return raw ? safeJsonParse<ExtraLecture[]>(raw, []) : []
+}
+
+export const getExtraLecturesForDate = async (date: string): Promise<ExtraLecture[]> => {
+  const all = await getExtraLectures()
+  return all.filter(e => e.date === date)
+}
+
+// Upserts by id, so editing an added class keeps its id (and therefore the
+// attendance already recorded against that id).
+export const saveExtraLecture = async (entry: ExtraLecture): Promise<void> => {
+  const all = await getExtraLectures()
+  const updated = all.filter(e => e.id !== entry.id)
+  updated.push(entry)
+  await AsyncStorage.setItem(EXTRA_LECTURES_KEY, JSON.stringify(updated))
+}
+
+export const removeExtraLecture = async (id: string): Promise<void> => {
+  const all = await getExtraLectures()
+  const updated = all.filter(e => e.id !== id)
+  await AsyncStorage.setItem(EXTRA_LECTURES_KEY, JSON.stringify(updated))
 }
 
 // Drops any override rows whose date has passed, so overrides never linger
@@ -123,6 +166,15 @@ export const saveAttendance = async (entry: Attendance): Promise<void> => {
 // AsyncStorage read-modify-writes. Entries with the same lectureId+date as
 // an incoming one are replaced, same "last write wins" semantics as
 // saveAttendance.
+// Deletes every attendance record for one (lectureId, date) pair. Used when
+// a class is removed for a day, so the removed class doesn't linger in
+// exports/imports/stats as attendance history - it's gone entirely.
+export const deleteAttendance = async (lectureId: string, date: string): Promise<void> => {
+  const data = await getAttendance()
+  const updated = data.filter(e => !(e.lectureId === lectureId && e.date === date))
+  await AsyncStorage.setItem(ATTENDANCE_KEY, JSON.stringify(updated))
+}
+
 export const saveAttendanceBulk = async (entries: Attendance[]): Promise<void> => {
   if (entries.length === 0) return
   const data = await getAttendance()
@@ -139,6 +191,7 @@ export const clearAllData = async (): Promise<void> => {
     BREAKS_KEY,
     TIMETABLE_IMPORTED_KEY,
     OVERRIDES_KEY,
+    EXTRA_LECTURES_KEY,
     ATTENDANCE_THRESHOLD_KEY,
     LOW_ATTENDANCE_NOTIFIED_KEY,
     SUBJECT_THRESHOLDS_KEY,

@@ -49,3 +49,15 @@ export type Holiday = {
   date: string // YYYY-MM-DD
   label?: string
 }
+
+// A one-off class that exists only on `date` (e.g. a special lecture added
+// from the Today tab for a single day). It has its own id so attendance can
+// be recorded against it like any other class, but it never appears on any
+// other date and is not part of the master weekly timetable.
+export type ExtraLecture = {
+  id: string
+  date: string // YYYY-MM-DD - the single day this class exists
+  subject: string
+  startTime: string
+  note?: string
+}

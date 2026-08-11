@@ -6,6 +6,12 @@ export const toMinutes = (t: string) => {
   return h * 60 + (m || 0)
 }
 
+// Canonical "HH:MM" / "H:MM" time format, shared by anything that accepts a
+// raw time string from outside the app (AI timetable import JSON, pasted
+// CSV import) - one definition instead of each call site rolling its own
+// regex that could quietly diverge on what counts as valid.
+export const DAY_TIME_RE = /^([01]?\d|2[0-3]):([0-5]\d)$/
+
 // Formats a Date as YYYY-MM-DD using its LOCAL fields (not toISOString,
 // which converts to UTC first). For timezones ahead of UTC - e.g. India,
 // UTC+5:30 - toISOString() on a local midnight date rolls back to the

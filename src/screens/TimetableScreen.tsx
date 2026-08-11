@@ -2,9 +2,10 @@
 // Read-only view of the permanent/master timetable. There is deliberately no
 // in-app editing here - the master timetable is only set/replaced via the
 // AI-import flow in Settings. For a single-day change, see the Today tab.
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { View, Text, StyleSheet, ScrollView } from "react-native"
 import { SafeAreaView } from "react-native-safe-area-context"
+import { useFocusEffect } from "@react-navigation/native"
 import { MaterialIcons } from "@expo/vector-icons"
 import { getLectures, getBreaks, isTimetableImported } from "../storage/storage"
 import { Lecture, Break } from "../types"
@@ -20,6 +21,16 @@ export default function TimetableScreen() {
   useEffect(() => {
     load()
   }, [])
+
+  // Same staleness gap as TodayScreen: this screen stays mounted across tab
+  // switches, so a timetable re-import done from Settings wouldn't show up
+  // here until some other prop change forced a remount. Refetch on every
+  // focus so storage stays the one source of truth this view reflects.
+  useFocusEffect(
+    useCallback(() => {
+      load()
+    }, [])
+  )
 
   const load = async () => {
     const [lectureData, breakData, importedFlag] = await Promise.all([

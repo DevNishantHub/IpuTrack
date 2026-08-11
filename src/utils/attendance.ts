@@ -26,16 +26,13 @@ export const calculateBunkInfo = (
     .map(l => l.id)
   const subjectAttendance = attendance.filter(a => lectureIds.includes(a.lectureId))
 
-  const present = subjectAttendance.filter(a => a.status === "present").length
-  const absent = subjectAttendance.filter(a => a.status === "absent").length
+  const { present, absent, percentage: currentPct } = calculateStats(subjectAttendance)
   const totalClasses = lectureIds.length
   const attendedClasses = present + absent
 
   if (totalClasses === 0) {
     return { canSkip: 0, mustAttend: 0, currentPct: 0 }
   }
-
-  const currentPct = attendedClasses === 0 ? 0 : (present / attendedClasses) * 100
 
   // Calculate future classes remaining
   const futureClasses = totalClasses - attendedClasses

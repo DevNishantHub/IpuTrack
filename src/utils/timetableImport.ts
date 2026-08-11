@@ -1,5 +1,6 @@
 // src/utils/timetableImport.ts
 import { Lecture } from "../types"
+import { DAY_TIME_RE } from "./dateHelpers"
 
 // The prompt the user copies and pastes into ChatGPT/Gemini/etc, alongside a
 // photo of their printed/handwritten timetable. Keep this in sync with
@@ -23,8 +24,6 @@ Reply with ONLY the JSON array. Nothing else.`
 export type ImportValidationResult =
   | { ok: true; lectures: Lecture[] }
   | { ok: false; error: string }
-
-const DAY_TIME_RE = /^([01]?\d|2[0-3]):([0-5]\d)$/
 
 // Validates and normalizes JSON pasted back from the external AI into real
 // Lecture objects. Deliberately strict: if anything looks off, we return a

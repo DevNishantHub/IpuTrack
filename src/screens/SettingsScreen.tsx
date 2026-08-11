@@ -14,9 +14,11 @@ import {
   DEFAULT_ATTENDANCE_THRESHOLD,
   getAttendance,
   getLectures,
+  getAllOverrides,
+  getExtraLectures,
   saveAttendanceBulk,
   getSemesterStartDate,
-  setSemesterStartDate,
+  setSemesterStartDate as saveSemesterStartDate,
   archiveCurrentSemester,
   getHolidays,
   addHoliday,
@@ -30,6 +32,23 @@ import { TIMETABLE_IMPORT_PROMPT, validateImportedTimetable } from "../utils/tim
 import { attendanceToCsv, parseAttendanceCsv } from "../utils/csv"
 import { getTodayDate, isValidDateString } from "../utils/dateHelpers"
 import { ensureNotificationPermission, scheduleClassReminders, cancelAllClassReminders } from "../utils/notifications"
+
+const MIN_REMINDER_MINUTES = 1
+const MAX_REMINDER_MINUTES = 180
+
+// Single source of truth for "is this a valid reminder lead time" - every
+// call site (toggling reminders on, toggling off, saving the minutes field)
+// used to parse+range-check this by hand, and had quietly drifted into
+// three different rules (one of them not range-checking at all). Returns
+// the parsed minutes if valid, otherwise null so each caller decides its
+// own fallback behavior (silently default vs. reject with an alert).
+const parseReminderMinutes = (input: string): number | null => {
+  const minutes = parseInt(input, 10)
+  if (!Number.isFinite(minutes) || minutes < MIN_REMINDER_MINUTES || minutes > MAX_REMINDER_MINUTES) {
+    return null
+  }
+  return minutes
+}
 
 export default function SettingsScreen() {
   const [imported, setImported] = useState(false)
@@ -162,7 +181,7 @@ export default function SettingsScreen() {
     try {
       await archiveCurrentSemester()
       const today = getTodayDate()
-      setSemesterStartDate(today)
+      setSemesterStartDate(today) // local UI state only; storage write already done inside archiveCurrentSemester
       setSemesterDateInput(today)
       Alert.alert("Semester Archived", "Current attendance archived. New semester started today.")
     } catch (err) {
@@ -180,7 +199,7 @@ export default function SettingsScreen() {
       return
     }
     try {
-      await setSemesterStartDate(semesterDateInput)
+      await saveSemesterStartDate(semesterDateInput)
       setSemesterStartDate(semesterDateInput)
       Alert.alert("Saved", `Semester start date set to ${semesterDateInput}`)
     } catch (err) {
@@ -192,16 +211,26 @@ export default function SettingsScreen() {
   const exportAttendanceCsv = async () => {
     setExporting(true)
     try {
-      const [attendance, lectures] = await Promise.all([getAttendance(), getLectures()])
+      const [attendance, lectures, overrides, extraLectures] = await Promise.all([
+        getAttendance(),
+        getLectures(),
+        getAllOverrides(),
+        getExtraLectures()
+      ])
       if (attendance.length === 0) {
         Alert.alert("Nothing to export", "You don't have any attendance records yet.")
         return
       }
-      const csv = attendanceToCsv(attendance, lectures)
+      // extraLectures lets one-off added classes resolve their
+      // subject/startTime; cancelled overrides keep classes removed for a
+      // day out of the export entirely (so the exported row count can be
+      // lower than the raw attendance count).
+      const csv = attendanceToCsv(attendance, lectures, overrides, extraLectures)
+      const exportedCount = csv.split("\n").length - 1
       await Clipboard.setStringAsync(csv)
       Alert.alert(
         "Copied to clipboard",
-        `${attendance.length} attendance records copied as CSV. Paste them into Sheets, Excel, Notes, or an email to save/edit them.`
+        `${exportedCount} attendance records copied as CSV. Paste them into Sheets, Excel, Notes, or an email to save/edit them.`
       )
     } catch (err) {
       console.warn("Failed to export attendance CSV:", err)
@@ -212,7 +241,15 @@ export default function SettingsScreen() {
   }
 
   const importAttendanceCsv = async () => {
-    const result = parseAttendanceCsv(csvInput)
+    const [lectures, extraLectures, overrides] = await Promise.all([
+      getLectures(),
+      getExtraLectures(),
+      getAllOverrides()
+    ])
+    // extraLectures lets one-off added classes match by date+startTime;
+    // overrides make rows for classes removed on a day get skipped, so a
+    // removal isn't undone by re-importing old data.
+    const result = parseAttendanceCsv(csvInput, lectures, extraLectures, overrides)
     if (!result.ok) {
       setCsvError(result.error)
       return
@@ -223,7 +260,7 @@ export default function SettingsScreen() {
       setShowCsvImport(false)
       setCsvInput("")
       setCsvError(null)
-      const skippedNote = result.skippedCount > 0 ? ` ${result.skippedCount} row(s) were skipped (bad date/status/id).` : ""
+      const skippedNote = result.skippedCount > 0 ? ` ${result.skippedCount} row(s) were skipped (no matching lecture/bad date/status).` : ""
       Alert.alert("Import complete", `${result.entries.length} record(s) saved.${skippedNote}`)
     } catch (err) {
       console.warn("Failed to import attendance CSV:", err)
@@ -306,16 +343,14 @@ export default function SettingsScreen() {
           )
           return
         }
-        const minutes = parseInt(reminderMinutesInput, 10)
-        const validMinutes = Number.isFinite(minutes) && minutes >= 1 && minutes <= 180
-          ? minutes
-          : DEFAULT_REMINDER_MINUTES_BEFORE
+        const validMinutes = parseReminderMinutes(reminderMinutesInput) ?? DEFAULT_REMINDER_MINUTES_BEFORE
         await setReminderSettings({ enabled: true, minutesBefore: validMinutes })
         setReminderMinutesInput(String(validMinutes))
         const lectures = await getLectures()
         await scheduleClassReminders(lectures, validMinutes)
       } else {
-        await setReminderSettings({ enabled: false, minutesBefore: parseInt(reminderMinutesInput, 10) || DEFAULT_REMINDER_MINUTES_BEFORE })
+        const validMinutes = parseReminderMinutes(reminderMinutesInput) ?? DEFAULT_REMINDER_MINUTES_BEFORE
+        await setReminderSettings({ enabled: false, minutesBefore: validMinutes })
         await cancelAllClassReminders()
       }
       setRemindersEnabled(value)
@@ -328,9 +363,9 @@ export default function SettingsScreen() {
   }
 
   const handleSaveReminderMinutes = async () => {
-    const minutes = parseInt(reminderMinutesInput, 10)
-    if (!Number.isFinite(minutes) || minutes < 1 || minutes > 180) {
-      Alert.alert("Invalid value", "Please enter a number of minutes between 1 and 180.")
+    const minutes = parseReminderMinutes(reminderMinutesInput)
+    if (minutes === null) {
+      Alert.alert("Invalid value", `Please enter a number of minutes between ${MIN_REMINDER_MINUTES} and ${MAX_REMINDER_MINUTES}.`)
       return
     }
     setSavingReminderMinutes(true)
@@ -619,8 +654,10 @@ export default function SettingsScreen() {
             <Text style={styles.cardTitle}>Import attendance</Text>
           </View>
           <Text style={styles.cardBody}>
-            Paste edited or backed-up CSV data back in. Only the date, lectureId, and status
-            columns are read - existing records for the same lecture and date are overwritten.
+            Paste edited or backed-up CSV data back in. Rows are matched to your current
+            timetable by date + startTime (not the lectureId column) - only date, startTime,
+            and status need to be right. Existing records for the matched lecture and date
+            are overwritten. Classes you removed on a day are skipped so they stay deleted.
           </Text>
 
           {!showCsvImport && (
@@ -763,4 +800,3 @@ const styles = StyleSheet.create({
   holidayRowDate: { ...typo.body, fontWeight: "600" },
   holidayRowLabel: { fontSize: 12, color: colors.onSurfaceVariant, marginTop: 2 }
 })
-
