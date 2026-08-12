@@ -100,54 +100,68 @@ export const scheduleClassReminders = async (
     console.warn("Failed to set up class-reminder notification channel:", err)
   }
 
-  for (const lecture of lectures) {
-    const [hours, minutes] = lecture.startTime.split(":").map(Number)
-    if (Number.isNaN(hours) || Number.isNaN(minutes)) {
-      // Malformed startTime on one lecture shouldn't stop the rest from
-      // being scheduled.
-      console.warn(`Skipping reminder for "${lecture.subject}": invalid startTime "${lecture.startTime}"`)
-      continue
-    }
+  // Fire all schedule calls concurrently instead of one at a time. Each
+  // scheduleNotificationAsync is an independent native-bridge round trip;
+  // awaiting them sequentially in a for-loop made this take several seconds
+  // (and feel "stuck") for a full timetable. They don't depend on each
+  // other, so there's nothing gained by serializing them.
+  await Promise.all(
+    lectures.map(async lecture => {
+      const [hours, minutes] = lecture.startTime.split(":").map(Number)
+      if (Number.isNaN(hours) || Number.isNaN(minutes)) {
+        // Malformed startTime on one lecture shouldn't stop the rest from
+        // being scheduled.
+        console.warn(`Skipping reminder for "${lecture.subject}": invalid startTime "${lecture.startTime}"`)
+        return
+      }
 
-    // expo-notifications' WEEKLY trigger uses 1=Sunday..7=Saturday;
-    // Lecture.day uses JS's 0=Sunday..6=Saturday (see dateHelpers).
-    let weekday = lecture.day + 1
-    let totalMinutes = hours * 60 + minutes - minutesBefore
+      // lecture.day must be an integer 0-6 (0=Sunday..6=Saturday) to produce
+      // a valid weekday for expo-notifications' WEEKLY trigger (1=Sunday..7=Saturday).
+      if (!Number.isInteger(lecture.day) || lecture.day < 0 || lecture.day > 6) {
+        console.warn(`Skipping reminder for "${lecture.subject}": invalid day "${lecture.day}"`)
+        return
+      }
 
-    // If "minutesBefore" pushes the reminder before midnight, it belongs
-    // on the previous weekday instead - roll both fields back together so
-    // e.g. a 00:05 Monday class with a 10-minute reminder correctly fires
-    // at 23:55 on Sunday, not at a nonsensical negative time on Monday.
-    while (totalMinutes < 0) {
-      totalMinutes += 24 * 60
-      weekday = weekday === 1 ? 7 : weekday - 1
-    }
+      // expo-notifications' WEEKLY trigger uses 1=Sunday..7=Saturday;
+      // Lecture.day uses JS's 0=Sunday..6=Saturday (see dateHelpers).
+      let weekday = lecture.day + 1
+      let totalMinutes = hours * 60 + minutes - minutesBefore
 
-    const reminderHour = Math.floor(totalMinutes / 60) % 24
-    const reminderMinute = totalMinutes % 60
+      // If "minutesBefore" pushes the reminder before midnight, it belongs
+      // on the previous weekday instead - roll both fields back together so
+      // e.g. a 00:05 Monday class with a 10-minute reminder correctly fires
+      // at 23:55 on Sunday, not at a nonsensical negative time on Monday.
+      while (totalMinutes < 0) {
+        totalMinutes += 24 * 60
+        weekday = weekday === 1 ? 7 : weekday - 1
+      }
 
-    const safeSubject = sanitizeForNotification(lecture.subject)
-    const safeNote = lecture.note ? sanitizeForNotification(lecture.note) : undefined
+      const reminderHour = Math.floor(totalMinutes / 60) % 24
+      const reminderMinute = totalMinutes % 60
 
-    try {
-      await Notifications.scheduleNotificationAsync({
-        identifier: `${REMINDER_ID_PREFIX}${lecture.id}`,
-        content: {
-          title: "Upcoming class",
-          body: `${safeSubject} at ${lecture.startTime}${safeNote ? ` · ${safeNote}` : ""}`,
-        },
-        trigger: {
-          type: Notifications.SchedulableTriggerInputTypes.WEEKLY,
-          weekday,
-          hour: reminderHour,
-          minute: reminderMinute,
-        },
-      })
-    } catch (err) {
-      // One lecture failing to schedule (e.g. a platform quirk, or the
-      // OS-level pending-notification cap being hit) shouldn't abort the
-      // rest of the loop.
-      console.warn(`Failed to schedule reminder for "${lecture.subject}":`, err)
-    }
-  }
+      const safeSubject = sanitizeForNotification(lecture.subject)
+      const safeNote = lecture.note ? sanitizeForNotification(lecture.note) : undefined
+
+      try {
+        await Notifications.scheduleNotificationAsync({
+          identifier: `${REMINDER_ID_PREFIX}${lecture.id}`,
+          content: {
+            title: "Upcoming class",
+            body: `${safeSubject} at ${lecture.startTime}${safeNote ? ` · ${safeNote}` : ""}`,
+          },
+          trigger: {
+            type: Notifications.SchedulableTriggerInputTypes.WEEKLY,
+            weekday,
+            hour: reminderHour,
+            minute: reminderMinute,
+          },
+        })
+      } catch (err) {
+        // One lecture failing to schedule (e.g. a platform quirk, or the
+        // OS-level pending-notification cap being hit) shouldn't abort the
+        // rest.
+        console.warn(`Failed to schedule reminder for "${lecture.subject}":`, err)
+      }
+    })
+  )
 }

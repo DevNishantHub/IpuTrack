@@ -113,12 +113,60 @@ export const setMasterTimetable = async (lectures: Lecture[]): Promise<void> => 
       newIdentityCounts.set(key, (newIdentityCounts.get(key) ?? 0) + 1)
     }
     const idMap = new Map<string, string>()
+    const mappedOldIds = new Set<string>()
+    const mappedNewIds = new Set<string>()
     for (const lecture of lectures) {
       const key = deterministicIdFor(lecture)
       if (newIdentityCounts.get(key) !== 1) continue
       const oldId = oldIdByDeterministicId.get(key)
-      if (oldId !== undefined && oldId !== lecture.id) idMap.set(oldId, lecture.id)
+      if (oldId !== undefined && oldId !== lecture.id) {
+        idMap.set(oldId, lecture.id)
+        mappedOldIds.add(oldId)
+        mappedNewIds.add(lecture.id)
+      }
     }
+
+    // Pass 1 only catches an exact re-import (nothing changed). A genuine
+    // "update" of one existing class - fixing its time, renaming its
+    // subject, editing a note-worthy detail - changes that class's identity,
+    // so it'd otherwise be left unmapped and silently orphan its attendance
+    // (the old id disappears from the new timetable). Fall back to matching
+    // the remaining not-yet-mapped old/new lectures on a partial key, but
+    // only when the match is unambiguous (exactly one candidate on each
+    // side) - anything ambiguous stays unmapped rather than guessed.
+    //
+    // mappedOldIds/mappedNewIds (not the input arrays) is what prevents
+    // double-mapping - they're updated in-place during each pass.
+    const fallbackPass = (keyFor: (l: { subject: string; day: number; startTime: string }) => string) => {
+      const oldByKey = new Map<string, { id: string; count: number }>()
+      for (const l of oldLectures) {
+        if (mappedOldIds.has(l.id)) continue
+        const key = keyFor(l)
+        const entry = oldByKey.get(key)
+        oldByKey.set(key, { id: l.id, count: (entry?.count ?? 0) + 1 })
+      }
+      const newByKey = new Map<string, { id: string; count: number }>()
+      for (const l of lectures) {
+        if (mappedNewIds.has(l.id)) continue
+        const key = keyFor(l)
+        const entry = newByKey.get(key)
+        newByKey.set(key, { id: l.id, count: (entry?.count ?? 0) + 1 })
+      }
+      for (const [key, oldEntry] of oldByKey) {
+        if (oldEntry.count !== 1) continue
+        const newEntry = newByKey.get(key)
+        if (!newEntry || newEntry.count !== 1) continue
+        if (newEntry.id === oldEntry.id) continue
+        idMap.set(oldEntry.id, newEntry.id)
+        mappedOldIds.add(oldEntry.id)
+        mappedNewIds.add(newEntry.id)
+      }
+    }
+    // Same slot (day+time), subject edited - e.g. fixing a typo'd name.
+    fallbackPass(l => `${l.day}-${timeTokenForId(l.startTime)}`)
+    // Same subject+day, time edited - e.g. class got rescheduled.
+    fallbackPass(l => `${slugifyId(l.subject)}-${l.day}`)
+
     const remap = (id: string) => idMap.get(id) ?? id
 
     const remappedAttendance = dedupeByKey(
