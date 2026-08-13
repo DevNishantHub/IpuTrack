@@ -1,5 +1,5 @@
 // src/screens/StatsScreen.tsx
-import { useCallback, useState } from "react"
+import { useCallback, useMemo, useState } from "react"
 import { View, Text, StyleSheet, ScrollView, Alert } from "react-native"
 import { SafeAreaView } from "react-native-safe-area-context"
 import { useFocusEffect } from "@react-navigation/native"
@@ -41,13 +41,11 @@ export default function StatsScreen() {
   const [trendData, setTrendData] = useState<{ date: string; percentage: number }[]>([])
   const [confirmingArchive, setConfirmingArchive] = useState(false)
 
-  useFocusEffect(
-    useCallback(() => {
-      load()
-    }, [])
-  )
-
-  const load = async () => {
+  // `load` is defined before useFocusEffect so the callback captures a
+  // stable reference. useCallback with an empty dep array is correct here:
+  // load reads all its data fresh from storage on every call and doesn't
+  // close over any component state that could go stale.
+  const load = useCallback(async () => {
     const [attendance, lectures, extras, globalThreshold, semStart]: [
       Attendance[],
       Lecture[],
@@ -108,7 +106,14 @@ export default function StatsScreen() {
       return { subject: displayName, ...stats, ...bunk, threshold: effectiveThreshold }
     })
     setBySubject(perSubject)
-  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useFocusEffect(
+    useCallback(() => {
+      load()
+    }, [load])
+  )
 
   const handleReset = async () => {
     await clearAllData()
@@ -122,9 +127,9 @@ export default function StatsScreen() {
     load()
   }
 
-  const ringColor = barColor(overall.percentage)
+  const ringColor = useMemo(() => barColor(overall.percentage), [overall.percentage])
 
-  const getTrendData = async (subject: string) => {
+  const getTrendData = useCallback(async (subject: string) => {
     const [attendance, lectures, extras, semStart] = await Promise.all([
       getAttendance(),
       getLectures(),
@@ -137,7 +142,7 @@ export default function StatsScreen() {
     const extraIds = extras.filter(e => normalizeSubject(e.subject) === key).map(e => e.id)
     // Empty semester start = include all attendance (same rule as load()).
     return getAttendanceTrend(attendance, lectures, subject, semStart ?? "", extraIds)
-  }
+  }, [])
 
   const handleTrendPress = async (subject: string) => {
     if (selectedTrendSubject === subject) {
@@ -202,7 +207,13 @@ export default function StatsScreen() {
         )}
 
         {bySubject.length === 0 && (
-          <Text style={styles.empty}>No lectures added yet.</Text>
+          <View style={styles.emptyCard}>
+            <Text style={styles.emptyTitle}>No lectures yet</Text>
+            <Text style={styles.emptyBody}>
+              Set up your timetable in Settings to start tracking attendance per subject.
+              Once you mark a class as present or absent on the Today tab, your stats will appear here.
+            </Text>
+          </View>
         )}
 
         {bySubject.map(s => (
@@ -299,6 +310,16 @@ const styles = StyleSheet.create({
   heroSubMuted: { fontSize: 12, color: colors.onSurfaceVariant, marginTop: 2 },
   sectionLabel: { ...typo.label, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: spacing(2) },
   empty: { ...typo.body, color: colors.onSurfaceVariant },
+  emptyCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    padding: spacing(5),
+    alignItems: "center" as const,
+    gap: spacing(2),
+    marginBottom: spacing(3),
+  },
+  emptyTitle: { ...typo.title, textAlign: "center" as const },
+  emptyBody: { ...typo.body, color: colors.onSurfaceVariant, textAlign: "center" as const, lineHeight: 20 },
   semesterCard: {
     backgroundColor: colors.surface,
     borderRadius: radius.md,

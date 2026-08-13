@@ -458,10 +458,12 @@ describe("attendance threshold", () => {
     expect(await getAttendanceThreshold()).toBe(DEFAULT_ATTENDANCE_THRESHOLD)
   })
 
-  it("stores 0 as a real value, not treated as unset", async () => {
+  it("clamps values below 1 to 1 (0 is not a valid threshold)", async () => {
+    // The valid range is [1, 100]. Storing 0 would produce nonsensical
+    // bunk calculations (division-by-zero risk), so it is clamped to 1
+    // both at the storage writer and the reader level.
     await setAttendanceThreshold(0)
-    // parseInt("0") -> 0, Number.isNaN(0) is false, so 0 should be honored
-    expect(await getAttendanceThreshold()).toBe(0)
+    expect(await getAttendanceThreshold()).toBe(1)
   })
 })
 

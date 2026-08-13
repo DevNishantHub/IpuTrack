@@ -400,14 +400,22 @@ export const clearAllData = async (): Promise<void> => {
 export const getAttendanceThreshold = async (): Promise<number> => {
   const raw = await AsyncStorage.getItem(ATTENDANCE_THRESHOLD_KEY)
   if (!raw) return DEFAULT_ATTENDANCE_THRESHOLD
-  const parsed = parseInt(raw, 10)
+  const parsed = parseFloat(raw)
   // Guard against a corrupted/non-numeric stored value silently disabling
-  // every low-attendance check (NaN comparisons are always false).
-  return Number.isNaN(parsed) ? DEFAULT_ATTENDANCE_THRESHOLD : parsed
+  // every low-attendance check (NaN comparisons are always false). Also
+  // re-clamp to [1, 100] in case a value outside that range was somehow
+  // written by an older version of the app.
+  if (Number.isNaN(parsed)) return DEFAULT_ATTENDANCE_THRESHOLD
+  return Math.min(100, Math.max(1, parsed))
 }
 
 export const setAttendanceThreshold = async (value: number): Promise<void> => {
-  await AsyncStorage.setItem(ATTENDANCE_THRESHOLD_KEY, value.toString())
+  // Clamp here as a belt-and-suspenders guard: the UI already validates, but
+  // the storage layer enforcing the range means a future caller can't
+  // accidentally persist a nonsensical threshold (0, negative, >100) that
+  // would silently break bunk calculations or notification checks.
+  const clamped = Math.min(100, Math.max(1, value))
+  await AsyncStorage.setItem(ATTENDANCE_THRESHOLD_KEY, clamped.toString())
 }
 
 export const wasLowAttendanceNotified = async (subject: string): Promise<boolean> => {
@@ -456,7 +464,7 @@ const resolveThreshold = (
   globalThreshold: number
 ): number => {
   const override = overrides[subject]
-  return typeof override === "number" && !Number.isNaN(override) ? override : globalThreshold
+  return typeof override === "number" ? override : globalThreshold
 }
 
 // Fetches overrides + global threshold once, then resolves every subject

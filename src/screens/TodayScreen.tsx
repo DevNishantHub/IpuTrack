@@ -1,5 +1,5 @@
 // src/screens/TodayScreen.tsx
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { View, Text, StyleSheet, ScrollView, Modal, TextInput, TouchableOpacity } from "react-native"
 import { SafeAreaView } from "react-native-safe-area-context"
 import { useFocusEffect } from "@react-navigation/native"
@@ -73,17 +73,29 @@ export default function TodayScreen() {
   const [addTime, setAddTime] = useState("")
   const [addNote, setAddNote] = useState("")
 
-  // Prune stale overrides exactly once, on mount - NOT on every load(). If
-  // this ran inside load() (which fires again right after saving an edit),
-  // it would delete the override you just created whenever you're backfilling
-  // a past day, since that override's date is before the real today. That
-  // made editing a previous day look like it silently failed.
-  useEffect(() => {
-    // Fire-and-forget: the override prune is best-effort cleanup, so a
-    // storage failure here must not surface as an unhandled rejection.
-    pruneExpiredOverrides(getTodayDate()).catch(() => { })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  // Guards against a notification race: if the user taps Present → Absent
+  // faster than an async checkLowAttendanceAndNotify round-trip completes,
+  // two overlapping calls could each see "not yet notified" and both fire
+  // a notification for the same subject. The ref is a simple mutex: the
+  // second caller bails out rather than running a stale check alongside
+  // the first. The ref is per-component instance, so it resets on unmount.
+  const notifyInFlight = useRef(false)
+
+  // Prune stale overrides on mount AND on every tab-focus, but NOT inside
+  // load(). Running inside load() would delete an override immediately after
+  // it was saved (e.g. when backfilling a past day), making edits appear to
+  // silently fail. Running only on mount means a session spanning midnight
+  // never prunes overrides from "yesterday" until the app is restarted.
+  // useFocusEffect fires once on mount and again each time the tab is
+  // revisited, which covers both cases without touching the write path.
+  // The today-date is captured at prune time (not at mount time) so a
+  // session spanning midnight always uses the real current date.
+  useFocusEffect(
+    useCallback(() => {
+      pruneExpiredOverrides(getTodayDate()).catch(() => { })
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [])
+  )
 
   useEffect(() => {
     load()
@@ -183,8 +195,13 @@ export default function TodayScreen() {
     // mark() or reload can read/write it - avoids double-notify and
     // missed-reset races.
     const isExtra = displayLectures.find(l => l.id === lectureId)?.isExtra
-    if (status !== "cancelled" && !isExtra) {
-      await checkLowAttendanceAndNotify(lectureId, allLectures, allAttendance)
+    if (status !== "cancelled" && !isExtra && !notifyInFlight.current) {
+      notifyInFlight.current = true
+      try {
+        await checkLowAttendanceAndNotify(lectureId, allLectures, allAttendance)
+      } finally {
+        notifyInFlight.current = false
+      }
     }
 
     await load({ allLectures, allAttendance })
@@ -199,10 +216,26 @@ export default function TodayScreen() {
     setDateJumpError(null)
   }
 
+  // How far into the future the user can navigate. One semester ahead
+  // (180 days) is enough for previewing upcoming days and backfilling; an
+  // unlimited future allows nonsensical dates (year 9999, etc.) that can
+  // silently pollute attendance storage with unresolvable records.
+  const MAX_FUTURE_DAYS = 180
+
+  const isBeyondFutureLimit = (dateStr: string) => {
+    const today = getTodayDate()
+    const limit = addDaysToDate(today, MAX_FUTURE_DAYS)
+    return dateStr > limit
+  }
+
   const submitDateJump = () => {
     const trimmed = dateJumpInput.trim()
     if (!isValidDateString(trimmed)) {
       setDateJumpError("Enter a date as YYYY-MM-DD")
+      return
+    }
+    if (isBeyondFutureLimit(trimmed)) {
+      setDateJumpError(`Can't navigate more than ${MAX_FUTURE_DAYS} days ahead`)
       return
     }
     goToDate(trimmed)
@@ -222,7 +255,7 @@ export default function TodayScreen() {
 
   const saveTodayEdit = async () => {
     if (!editing) return
-    if (!/^\d{1,2}:\d{2}$/.test(editTime.trim())) return
+    if (!editTime || !/^\d{1,2}:\d{2}$/.test(editTime.trim())) return
     const newSubject = editSubject.trim() || editing.subject
     const newTime = editTime.trim()
     const newNote = editNote.trim() || undefined
@@ -365,10 +398,20 @@ export default function TodayScreen() {
           </TouchableOpacity>
 
           <TouchableOpacity
-            onPress={() => goToDate(addDaysToDate(selectedDate, 1))}
+            onPress={() => {
+              const next = addDaysToDate(selectedDate, 1)
+              if (!isBeyondFutureLimit(next)) goToDate(next)
+            }}
             style={styles.dateNavArrow}
+            disabled={isBeyondFutureLimit(addDaysToDate(selectedDate, 1))}
           >
-            <MaterialIcons name="chevron-right" size={22} color={colors.onSurfaceVariant} />
+            <MaterialIcons
+              name="chevron-right"
+              size={22}
+              color={isBeyondFutureLimit(addDaysToDate(selectedDate, 1))
+                ? colors.onSurfaceVariant + "44"
+                : colors.onSurfaceVariant}
+            />
           </TouchableOpacity>
         </View>
 

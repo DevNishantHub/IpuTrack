@@ -159,17 +159,38 @@ const subjectsMatch = (a: string, b: string) => normalizeSubject(a) === normaliz
 // Builds the subject list for stats: one entry per normalized subject, so
 // names that differ only by case / trailing punctuation / a lab-room number
 // ("AI Lab" and "AI Lab 4") collapse onto a single card. Each entry is
-// labeled with the master timetable's spelling when one exists (falling back
-// to the extra class's spelling), so stats never show the same subject twice.
+// labeled with the most-frequent spelling found across master lectures
+// (falling back to the most-frequent extra spelling), so a timetable with
+// two lectures both called "AI Lab 4" correctly labels the merged card
+// "AI Lab 4" rather than silently using whichever raw spelling arrived
+// first - which could be a variant like "AI Lab" from a different source.
 export const subjectLabelsByKey = (
   lectures: Lecture[],
   extras: ExtraLecture[]
 ): Map<string, string> => {
-  const labels = new Map<string, string>()
+  // Count spelling frequency per normalized key so the most-common raw
+  // spelling wins (tie-break: first seen). Master-timetable spellings always
+  // take precedence over extra-lecture spellings, so an extra "AI Lab" can
+  // never steal the label from the timetable's "AI Lab 4".
+  const masterCounts = new Map<string, Map<string, number>>()
   for (const l of lectures) {
     const key = normalizeSubject(l.subject)
-    if (!labels.has(key)) labels.set(key, l.subject)
+    if (!masterCounts.has(key)) masterCounts.set(key, new Map())
+    const spellings = masterCounts.get(key)!
+    spellings.set(l.subject, (spellings.get(l.subject) ?? 0) + 1)
   }
+
+  const labels = new Map<string, string>()
+  for (const [key, spellings] of masterCounts) {
+    // Pick the spelling with the highest count (first-seen wins ties).
+    let bestSpelling = ""
+    let bestCount = 0
+    for (const [spelling, count] of spellings) {
+      if (count > bestCount) { bestSpelling = spelling; bestCount = count }
+    }
+    labels.set(key, bestSpelling)
+  }
+
   for (const e of extras) {
     const key = normalizeSubject(e.subject)
     if (!labels.has(key)) labels.set(key, e.subject)
@@ -282,15 +303,28 @@ export const parseAttendanceCsv = (
         continue
       }
       if (bySubject.length > 1) {
-        // More than one class with that subject that day - only a time that
-        // pins one of them down is unambiguous.
+        // More than one master class normalizes to the same subject that day
+        // (e.g. "AI Lab" and "AI Lab 4"). Try to pin one down by time.
         const bySubjectAndTime = bySubject.filter(l => toMinutes(l.startTime) === startMinutes)
-        if (bySubjectAndTime.length !== 1) {
-          skippedReasons.push(`Row ${rowNum}: ${bySubject.length} classes named "${subject}" that day (${date}) - add a time that matches one of them to disambiguate`)
+        if (bySubjectAndTime.length === 1) {
+          // Exactly one master lecture matches subject AND time - unambiguous.
+          covered(bySubjectAndTime[0].id)
+          mark(bySubjectAndTime[0].id)
           continue
         }
-        covered(bySubjectAndTime[0].id)
-        mark(bySubjectAndTime[0].id)
+        if (bySubjectAndTime.length > 1) {
+          // Multiple master lectures share subject AND time - genuinely
+          // unresolvable. Skip with a clear error rather than picking one.
+          skippedReasons.push(
+            `Row ${rowNum}: ${bySubjectAndTime.length} classes named "${subject}" at ${startTime} on ${date} - rename one in your timetable to disambiguate`
+          )
+        } else {
+          // No master lecture at that time - the time in the CSV doesn't
+          // match any class with that subject that day.
+          skippedReasons.push(
+            `Row ${rowNum}: ${bySubject.length} classes named "${subject}" on ${date} but none at ${startTime} - use the exact start time from your timetable to match one`
+          )
+        }
         continue
       }
       const lecture = bySubject[0]

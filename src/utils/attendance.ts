@@ -3,6 +3,7 @@ import { Attendance, Lecture } from "../types"
 import { getAttendanceThreshold, wasLowAttendanceNotified, setLowAttendanceNotified, getEffectiveThreshold } from "../storage/storage"
 import { notifyLowAttendance } from "./notifications"
 import { getSemesterStartDate } from "../storage/storage"
+import { normalizeSubject } from "./csv"
 
 export const calculateStats = (attendance: Attendance[]) => {
   const present = attendance.filter(a => a.status === "present").length
@@ -27,8 +28,12 @@ export const calculateBunkInfo = (
   threshold: number,
   extraLectureIds: string[] = []
 ): { canSkip: number; mustAttend: number; currentPct: number } => {
+  // Normalize both sides so "AI Lab" and "AI Lab 4" resolve to the same
+  // subject card. This mirrors the logic in StatsScreen and csv.ts so the
+  // bunk calculation is always consistent with what the stats screen shows.
+  const normalizedSubject = normalizeSubject(subject)
   const masterLectureIds = lectures
-    .filter(l => l.subject === subject)
+    .filter(l => normalizeSubject(l.subject) === normalizedSubject)
     .map(l => l.id)
   const lectureIds = [...masterLectureIds, ...extraLectureIds]
   const subjectAttendance = attendance.filter(a => lectureIds.includes(a.lectureId))
@@ -68,8 +73,17 @@ export const calculateBunkInfo = (
     // present*100 + x*100 >= threshold*attendedClasses + threshold*x
     // x*(100 - threshold) >= threshold*attendedClasses - present*100
     // x >= (threshold*attendedClasses - present*100) / (100 - threshold)
-    mustAttend = Math.ceil((threshold * attendedClasses - present * 100) / (100 - threshold))
-    mustAttend = Math.max(0, Math.min(mustAttend, futureClasses))
+    //
+    // Special case: threshold = 100 makes the denominator (100 - threshold)
+    // zero. At 100% the student must attend every remaining class - there is
+    // no finite x that can recover attendance once any class is missed, so
+    // clamp to futureClasses (the maximum achievable).
+    if (threshold >= 100) {
+      mustAttend = futureClasses
+    } else {
+      mustAttend = Math.ceil((threshold * attendedClasses - present * 100) / (100 - threshold))
+      mustAttend = Math.max(0, Math.min(mustAttend, futureClasses))
+    }
   }
 
   return { canSkip, mustAttend, currentPct }
@@ -82,8 +96,9 @@ export const getAttendanceTrend = (
   semesterStartDate: string,
   extraLectureIds: string[] = []
 ): { date: string; percentage: number }[] => {
+  const normalizedSubject = normalizeSubject(subject)
   const lectureIds = [
-    ...lectures.filter(l => l.subject === subject).map(l => l.id),
+    ...lectures.filter(l => normalizeSubject(l.subject) === normalizedSubject).map(l => l.id),
     ...extraLectureIds
   ]
   const subjectAttendance = attendance.filter(a => lectureIds.includes(a.lectureId))
@@ -135,8 +150,9 @@ export const checkLowAttendanceAndNotify = async (
   }
 
   const subject = lecture.subject
+  const normalizedSubject = normalizeSubject(subject)
   const lectureIds = allLectures
-    .filter(l => l.subject === subject)
+    .filter(l => normalizeSubject(l.subject) === normalizedSubject)
     .map(l => l.id)
   const subjectAttendance = allAttendance.filter(a => lectureIds.includes(a.lectureId))
 
