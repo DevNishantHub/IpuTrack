@@ -10,7 +10,6 @@ import {
   saveAttendance,
   getOverridesForDate,
   saveOverride,
-  clearOverride,
   pruneExpiredOverrides,
   getHolidayForDate,
   removeHoliday,
@@ -64,9 +63,6 @@ export default function TodayScreen() {
   const [editTime, setEditTime] = useState("")
   const [editNote, setEditNote] = useState("")
 
-  // Classes hidden for this day via Remove (cancelled override), so the user
-  // can restore them instead of being stuck with an irreversible removal.
-  const [removedLectures, setRemovedLectures] = useState<DisplayLecture[]>([])
   // The class the user is being asked to confirm removing. Rendered as an
   // inline confirm (on the card, or inside the edit modal) instead of a
   // native Alert - RN Web's Alert is a no-op, so a native dialog would
@@ -85,7 +81,7 @@ export default function TodayScreen() {
   useEffect(() => {
     // Fire-and-forget: the override prune is best-effort cleanup, so a
     // storage failure here must not surface as an unhandled rejection.
-    pruneExpiredOverrides(getTodayDate()).catch(() => {})
+    pruneExpiredOverrides(getTodayDate()).catch(() => { })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -158,26 +154,7 @@ export default function TodayScreen() {
       }))
     ].sort((a, b) => toMinutes(a.startTime) - toMinutes(b.startTime))
 
-    // Classes removed for this day (cancelled override), shown in the
-    // "Removed for this day" section with a Restore action.
-    const removed: DisplayLecture[] = dayLectures
-      .map(l => {
-        const o = overrideFor(l.id)
-        if (!o || !o.cancelled) return null
-        return {
-          ...l,
-          subject: o.subject ?? l.subject,
-          startTime: o.startTime ?? l.startTime,
-          note: o.note ?? l.note,
-          overridden: true,
-          isExtra: false
-        } as DisplayLecture
-      })
-      .filter((l): l is DisplayLecture => l !== null)
-      .sort((a, b) => toMinutes(a.startTime) - toMinutes(b.startTime))
-
     setDisplayLectures(merged)
-    setRemovedLectures(removed)
     setDayAttendance(allAttendance.filter((a: Attendance) => a.date === selectedDate))
   }
 
@@ -246,25 +223,48 @@ export default function TodayScreen() {
   const saveTodayEdit = async () => {
     if (!editing) return
     if (!/^\d{1,2}:\d{2}$/.test(editTime.trim())) return
+    const newSubject = editSubject.trim() || editing.subject
+    const newTime = editTime.trim()
+    const newNote = editNote.trim() || undefined
     if (editing.isExtra) {
-      // A one-off added class is edited in place - same id, so any
-      // attendance already recorded against it stays linked.
+      // One-off class: edit in place - same id keeps attendance linked.
       await saveExtraLecture({
         id: editing.id,
         date: selectedDate,
-        subject: editSubject.trim() || editing.subject,
-        startTime: editTime.trim(),
-        note: editNote.trim() || undefined
+        subject: newSubject,
+        startTime: newTime,
+        note: newNote
       })
     } else {
+      // Master-timetable lecture: treat edit as "remove old, add new".
+      // 1. Cancel the original master lecture for this day only.
       await saveOverride({
         id: `${editing.id}-${selectedDate}`,
         date: selectedDate,
         lectureId: editing.id,
-        subject: editSubject.trim() || editing.subject,
-        startTime: editTime.trim(),
-        note: editNote.trim() || undefined
+        cancelled: true
       })
+      // 2. Create a new extra lecture with the edited details.
+      const newId = `${slugifyId(newSubject)}-${selectedDate}-${timeTokenForId(newTime)}`
+      await saveExtraLecture({
+        id: newId,
+        date: selectedDate,
+        subject: newSubject,
+        startTime: newTime,
+        note: newNote
+      })
+      // 3. Migrate any existing attendance from the old id to the new one
+      //    so present/absent marks aren't lost when the user edits after marking.
+      const oldStatus = statusFor(editing.id)
+      if (oldStatus) {
+        await deleteAttendance(editing.id, selectedDate)
+        await saveAttendance({
+          id: `${newId}-${selectedDate}`,
+          lectureId: newId,
+          date: selectedDate,
+          status: oldStatus
+        })
+      }
     }
     setEditing(null)
     await load()
@@ -304,11 +304,6 @@ export default function TodayScreen() {
     await load()
   }
 
-  const restoreRemoved = async (l: DisplayLecture) => {
-    await clearOverride(l.id, selectedDate)
-    await load()
-  }
-
   const openAdd = () => {
     setAddSubject(ALL_SUBJECTS[0])
     setAddTime("")
@@ -333,13 +328,6 @@ export default function TodayScreen() {
       note: addNote.trim() || undefined
     })
     closeAdd()
-    await load()
-  }
-
-  const revertToday = async () => {
-    if (!editing) return
-    await clearOverride(editing.id, selectedDate)
-    setEditing(null)
     await load()
   }
 
@@ -466,11 +454,6 @@ export default function TodayScreen() {
                 <View style={{ flex: 1 }}>
                   <View style={styles.titleRow}>
                     <Text style={styles.title}>{l.subject}</Text>
-                    {l.overridden && (
-                      <View style={styles.editedBadge}>
-                        <Text style={styles.editedBadgeText}>Edited for today</Text>
-                      </View>
-                    )}
                     {l.isExtra && (
                       <View style={styles.addedBadge}>
                         <Text style={styles.addedBadgeText}>Added for today</Text>
@@ -531,23 +514,7 @@ export default function TodayScreen() {
           )
         })}
 
-        {!holiday && removedLectures.length > 0 && (
-          <View>
-            <Text style={styles.removedLabel}>REMOVED FOR THIS DAY</Text>
-            {removedLectures.map(l => (
-              <View key={l.id} style={styles.removedCard}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.removedTitle}>{l.subject}</Text>
-                  <Text style={styles.removedTime}>
-                    {l.startTime}
-                    {l.note ? `  ·  ${l.note}` : ""}
-                  </Text>
-                </View>
-                <MdButton title="Restore" variant="text" onPress={() => restoreRemoved(l)} />
-              </View>
-            ))}
-          </View>
-        )}
+
       </ScrollView>
 
       <Modal visible={!!editing} transparent animationType="fade" onRequestClose={closeEdit}>
@@ -555,9 +522,7 @@ export default function TodayScreen() {
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>Change just for today</Text>
             <Text style={styles.modalSubtitle}>
-              {editing?.isExtra
-                ? `This class only exists on ${selectedDate}, so changes apply here only.`
-                : `This only affects ${editing?.subject} today. Your permanent timetable stays the same.`}
+              Changes apply to {selectedDate} only. Your permanent timetable stays the same.
             </Text>
 
             <Text style={styles.label}>Subject</Text>
@@ -595,9 +560,6 @@ export default function TodayScreen() {
               <>
                 <View style={styles.modalButtonsRow}>
                   <MdButton title="Remove class for today" variant="danger" onPress={() => editing && confirmRemove(editing)} />
-                  {editing?.overridden && !editing?.isExtra && (
-                    <MdButton title="Revert to normal" variant="text" onPress={revertToday} />
-                  )}
                 </View>
                 <View style={styles.modalButtonsRow}>
                   <MdButton title="Close" variant="text" onPress={closeEdit} />
@@ -715,13 +677,6 @@ const styles = StyleSheet.create({
   titleRow: { flexDirection: "row", alignItems: "center", gap: spacing(2), flexWrap: "wrap" },
   title: { ...typo.title },
   time: { ...typo.body, color: colors.onSurfaceVariant, marginTop: 2 },
-  editedBadge: {
-    backgroundColor: colors.primaryContainer,
-    borderRadius: radius.full,
-    paddingVertical: 2,
-    paddingHorizontal: 8
-  },
-  editedBadgeText: { fontSize: 10, fontWeight: "600", color: colors.primaryDark },
   editBtn: { paddingHorizontal: 8 },
   badge: {
     flexDirection: "row",
@@ -789,15 +744,5 @@ const styles = StyleSheet.create({
   },
   confirmText: { ...typo.body, color: colors.onSurface, marginBottom: spacing(3) },
   confirmButtons: { flexDirection: "row", justifyContent: "flex-end", gap: spacing(2) },
-  removedLabel: { ...typo.label, textTransform: "uppercase", letterSpacing: 0.5, marginTop: spacing(3), marginBottom: spacing(2) },
-  removedCard: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: colors.neutralContainer,
-    borderRadius: radius.md,
-    padding: spacing(3),
-    marginBottom: spacing(2)
-  },
-  removedTitle: { ...typo.body, fontWeight: "600" },
-  removedTime: { fontSize: 12, color: colors.onSurfaceVariant, marginTop: 2 }
+
 })
